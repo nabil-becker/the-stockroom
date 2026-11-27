@@ -45,6 +45,7 @@ VERSION_OPTIONS = {
     "ghcr.io/nabil-becker/devcontainer-features/copilot": (),
     "ghcr.io/nabil-becker/devcontainer-features/devcontainer-cli": ("version",),
     "ghcr.io/nabil-becker/devcontainer-features/facilitator": (),
+    "ghcr.io/nabil-becker/devcontainer-features/gh": ("version",),
     "ghcr.io/nabil-becker/devcontainer-features/git": (),
     "ghcr.io/nabil-becker/devcontainer-features/go-task": ("version",),
     "ghcr.io/nabil-becker/devcontainer-features/openbao": ("version",),

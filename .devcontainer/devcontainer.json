@@ -43,7 +43,7 @@
     // you start through the tasks: the launcher adds that mount (git 1.4.0 or
     // later; see "Host mounts" below).
     "ghcr.io/nabil-becker/devcontainer-features/git:1": {},
-    // "ghcr.io/nabil-becker/devcontainer-features/gh:1": {},
+    "ghcr.io/nabil-becker/devcontainer-features/gh:1": { "version": "2.106.0" },
     "ghcr.io/nabil-becker/devcontainer-features/claude-code:1": { "participants": true, "version": "2.1.326" },
     // The Feature pins the Copilot CLI itself (its dependsOn copilot-cli version).
     "ghcr.io/nabil-becker/devcontainer-features/copilot:0": { "participants": true },

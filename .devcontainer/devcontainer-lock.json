@@ -58,6 +58,11 @@
       "resolved": "ghcr.io/nabil-becker/devcontainer-features/facilitator@sha256:4dd0dfc47f2d615aff4b3bd4647f1adbecfdcbbe6a0e5e691a1ba5b021c6bcbb",
       "integrity": "sha256:4dd0dfc47f2d615aff4b3bd4647f1adbecfdcbbe6a0e5e691a1ba5b021c6bcbb"
     },
+    "ghcr.io/nabil-becker/devcontainer-features/gh:1": {
+      "version": "1.1.0",
+      "resolved": "ghcr.io/nabil-becker/devcontainer-features/gh@sha256:f5251d6f2b433683a1e002403214760dcc23af62ee5ea576f89247349e200655",
+      "integrity": "sha256:f5251d6f2b433683a1e002403214760dcc23af62ee5ea576f89247349e200655"
+    },
     "ghcr.io/nabil-becker/devcontainer-features/git:1": {
       "version": "1.4.6",
       "resolved": "ghcr.io/nabil-becker/devcontainer-features/git@sha256:c03136661d3ae0dd427f0d0dd1566b8528735a9487e1b9afef93cd83cad5b0c2",
