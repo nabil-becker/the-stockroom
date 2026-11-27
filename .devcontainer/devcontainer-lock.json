@@ -25,10 +25,10 @@
       "resolved": "ghcr.io/devcontainers/features/kubectl-helm-minikube@sha256:85bbe589703f8247b594ec821b028e7bb807d05c2bced61085403221ff71f1e5",
       "integrity": "sha256:85bbe589703f8247b594ec821b028e7bb807d05c2bced61085403221ff71f1e5"
     },
-    "ghcr.io/devcontainers/features/powershell:1": {
-      "version": "1.5.1",
-      "resolved": "ghcr.io/devcontainers/features/powershell@sha256:df7baa89598c93bfd15808641d9ec9eb03e0ccdf52e5de4cbbce9ab2d9755d18",
-      "integrity": "sha256:df7baa89598c93bfd15808641d9ec9eb03e0ccdf52e5de4cbbce9ab2d9755d18"
+    "ghcr.io/devcontainers/features/powershell:2": {
+      "version": "2.0.4",
+      "resolved": "ghcr.io/devcontainers/features/powershell@sha256:34cd20ddd57ab8cc11cba8af7cc21314fbb28855d4dca50168f9a9bae2de51a7",
+      "integrity": "sha256:34cd20ddd57ab8cc11cba8af7cc21314fbb28855d4dca50168f9a9bae2de51a7"
     },
     "ghcr.io/nabil-becker/devcontainer-features/claude-code:1": {
       "version": "1.14.2",
