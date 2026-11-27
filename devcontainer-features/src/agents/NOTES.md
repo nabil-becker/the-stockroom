@@ -1,0 +1,604 @@
+## How it fits
+
+```text
+  host: task devcontainer:agent -- <name>
+          |
+          v                    container
+  task agents -- <name>
+          |  reads .devcontainer/agents.yml (the repository's list)
+          |
+  agents -+-- adapter on PATH: agent-adapter-claude (from claude-code)
+          +-- leases, this container only
+          `-- tasks through go-task (agents: namespace)
+```
+
+| Data | Where it lives | Storage tier |
+| --- | --- | --- |
+| Agent list | `.devcontainer/agents.yml` in the repository | 1 git |
+| Leases and start markers | `/var/lib/devcontainer-features/agents`, not a volume; a lease must not survive a rebuild | 4 working set |
+| Agents' sessions | the CLI's own state (claude-code's volume) | 4 working set |
+
+Tiers are the four of ADR 0045: 1 git, 2 shared folder, 3 personal folder, 4 working set (rebuildable only).
+
+Used in: [agentic-devhost](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/reference-architectures/agentic-devhost.md)
+
+## Deprecated in 2.2.0: use claude-code `participants: true`
+
+This Feature is **deprecated**. Its code moved, unchanged, into a shared participant component
+(ADR-0061) that the `claude-code` Feature installs with `"participants": true` (claude-code 1.10.0).
+**Nothing changes for you in 2.x:** the `task agents:*` names, the `agents` command,
+`.devcontainer/agents.yml`, `AGENTS_FILE`, the `sessionName` option and the verbs the
+`devcontainer-cli` launcher calls (`task devcontainer:agent`) all work as in 2.1.3. Two things are
+new: `task agents:version` and `task agents:check` print one line on stderr,
+`deprecated: use claude-code participants: true`; and when `claude-code` (or another Feature) has
+already installed the component, this Feature installs nothing of it, so the two together leave one
+copy (`/usr/local/lib/dcf-participant`). It still writes its version and its `sessionName` to
+`/usr/local/share/agents-feature`, and its own `postStartCommand` still runs `agents up`.
+
+**To move** (any time in 2.x): set `"participants": true` on `claude-code` and remove the `agents`
+line. A `sessionName` set here becomes `AGENTS_SESSION_NAME` in the container's environment
+(`containerEnv`) or in `.devcontainer/.env`; `agents.yml` keeps its name. **3.0.0 retires the
+Feature** (it will install nothing and say where to go; `:2` stays in the registry). It is released
+only once claude-code has carried the component for a release, the documented consumers have
+moved, and the launcher's `devcontainer:agent` tasks are shown to work on the component alone.
+The deprecation convention is in CONTRIBUTING ("Deprecating a Feature or an option").
+
+## What it installs
+
+One standard way to start any agent, whatever its CLI. A repository declares its agents in one
+list; the `agents` command (on PATH, `/usr/local/bin/agents`) reads it and does the right thing
+for each agent's kind, through the adapter its CLI Feature supplies. The Feature installs that
+bash script, the Feature Taskfile and an empty state folder, all from the participant component
+(since 2.2.0: `/usr/local/lib/dcf-participant`, with `/usr/local/bin/agents` a symlink into it; the
+same paths otherwise); nothing is downloaded, so there is
+nothing to verify. It installs no adapter: the `claude-code` Feature (1.7.0 or later) brings
+`agent-adapter-claude`; other CLIs follow.
+
+```
+ HOST                                  DEVCONTAINER
+ task devcontainer:agent -- host  -->  task agents -- host [--resume|--new]
+                                          |
+                                          v
+                                       agent list (AGENTS_FILE, else .devcontainer/agents.yml)
+                                          |
+                     resident  <----------+---------->  on-demand
+            running? attach : start-bg/wake, attach     new (default) / resume (--resume)
+                                          |
+                                          v
+                                       agent-adapter-<cli>   (claude: claude --bg / attach / --resume ...)
+ container start (postStartCommand): agents up --post-start -> every resident runs, none attached
+```
+
+## The agent list
+
+`.devcontainer/agents.yml`, beside `devcontainer.json`, committed:
+
+```yaml
+agents:
+  - name: host               # unique; letters, digits, - and _
+    cli: claude              # picks the adapter: agent-adapter-claude
+    kind: on-demand          # resident | on-demand
+    folder: .                # repo-relative, default .
+    args: [--remote-control] # handed to the CLI as they are (a YAML list, no shell quoting)
+  - name: reviewer
+    cli: claude
+    kind: resident
+    folder: rooms/review
+    args:
+      - --model
+      - sonnet
+```
+
+2.0 adds five optional keys and 2.1 a sixth, `session-name`, all flat (one scalar each):
+
+```yaml
+  - name: tooling              # the handle
+    cli: claude
+    kind: resident
+    lifecycle: stateful        # stateful (default) | ephemeral
+    identity: tooling          # the principal it acts as; default: the name
+    lease: container           # container (stateful, the default) | none (ephemeral, the default)
+    definition: tooling        # the CLI's agent profile; read, checked and shown, not passed to the CLI in 2.0
+    default: true              # at most one agent: what `task agents` with no name starts
+    session-name: "{machine} {handle}"   # 2.1: the name its CLI shows; default the option, else {handle}
+    registry-path: /Corp/MyDepartment/team/tooling   # participant 1.2.0: who it is in the component registry
+```
+
+| Key | Values | Rule |
+| --- | --- | --- |
+| `lifecycle` | `stateful` (default), `ephemeral` | `ephemeral` with `kind: resident` is refused (the container start would create and discard it every time). |
+| `identity` | letters, digits, `-`, `_`; default the `name` | Two stateful agents may not share one; ephemeral agents may share each other's and one stateful agent's. |
+| `lease` | `container`, `none` | A stateful agent's lease is `container` (`none` is refused: that is what `ephemeral` means); an ephemeral agent's is `none`. `machine` and `cluster` are reserved and refused (Limits). One word: `lease: { scope: container }` is refused with a line pointing at the flat form. |
+| `definition` | letters, digits, `.`, `:`, `-`, `_` | Refused together with `--agent` in `args` (two sources for one fact). In 2.0 it is stored and shown only; `agents start` says so in one line and the CLI starts without it. A later 2.x hands it to the adapter. |
+| `session-name` | a template: letters, digits, space, `. _ : @ / ( ) -`, and `{handle}`, `{repo}`, `{machine}` (2.1) | The name the CLI shows for the agent's session, rendered once per start; wins over the Feature option. A value that starts with `{` must be quoted. Refused with its line when it does not render or is over 60 characters. See Session names. |
+| `registry-path` | an absolute path: `/` and segments of letters, digits, `.`, `_`, `-`; no wildcards (participant 1.2.0, agents 2.4.0) | Who this agent is in the component registry, handed to `dcf-registry resolve --as` at its start; without it `COMPONENT_REGISTRY_WHOAMI` applies. A relative path, a pattern or the key twice is refused with its line; `agents check` shows it. Read only when the `component-registry` Feature is installed (see The component registry at an agent's start). |
+| `default` | `true`, `false` | At most one agent; `agents check` names it. `task agents` (no name), `agents` and `agents start` without a name start it exactly as `agents start <name>`; with none marked they print the usage (exit 2) as before. |
+
+- `name`, `cli`, `kind` are required; `folder` defaults to `.` and must stay inside the
+  repository; `args` default to none.
+- Nothing else is read. An unknown key is a warning (with its line), not an error, so a
+  repository can note things for itself. One file: no includes, no per-user overrides.
+- A broken list is refused (exit 2) with every problem named by file and line. `task
+  agents:check` reads and checks it without starting anything.
+- The YAML is a small subset, read by awk: comments, plain, single- and double-quoted values, an
+  `args` list in flow (`[a, "b c"]`) or block (`- a`) form. No anchors, no multi-line values, no
+  `{ }` entries. Why awk: the Feature must work on every base image, and bash, awk and sed are
+  what they all have; python3 and jq are not guaranteed (the CI matrix includes `debian:latest`
+  and `ubuntu:latest`), and the other Features of this collection read JSON with sed for the same
+  reason. A vendored YAML parser would be a larger, unverified download for a five-key file.
+
+**Kinds and lifecycles.** `kind` says when it runs, `lifecycle` what it keeps:
+
+|  | `resident` | `on-demand` |
+| --- | --- | --- |
+| **stateful** | runs in the background from the container start; its lease is held while it runs; a second start joins it | opens a session in this terminal; the lease is held for the session's life; a second start is refused (exit 2) while it runs |
+| **ephemeral** | refused | a new session on every start, no lease, any number at once; `--resume` is refused (nothing is kept) |
+
+**Kinds.** `resident`: runs continuously in the background; starting it means make sure it runs,
+then attach. `on-demand`: starting it opens a new session in this terminal; it resumes its latest
+conversation only when asked.
+
+**Newer names (2.3.0).** This Feature is deprecated, and its copy of the participant component
+(1.1.0) also reads `.devcontainer/participants.yml`, the top-level key `participants:`,
+`PARTICIPANTS_FILE`, and the entry keys `attachment`, `description` and `skills`. They are
+documented under "The list file and the keys" in the [`claude-code` notes](../claude-code); what is
+below stays true for `agents.yml` and `AGENTS_FILE`.
+
+**Where the list is: `AGENTS_FILE`.** A path relative to the repository root (the nearest folder
+at or above the current one holding `.devcontainer/`; an absolute path is used as it is),
+resolved like every setting here (NFR-6), first wins:
+
+| Source | Example |
+| --- | --- |
+| task variable (before the `--`) | `task agents AGENTS_FILE=ops/agents.yml -- host` |
+| the root `.env`, then `.devcontainer/.env` | `AGENTS_FILE=ops/agents.yml` |
+| the environment (incl. `containerEnv`) | `"containerEnv": {"AGENTS_FILE": "ops/agents.yml"}` |
+| built-in default | `.devcontainer/agents.yml` |
+
+There is no Feature option for it (`containerEnv` already covers "committed with the
+repository"). A missing file is an error naming the path it looked for and where that path came
+from. Task fills its variables from `.env` and the environment too, so the task hands its
+variable over as `AGENTS_FILE_TASK_VAR`, and the command counts it as a task variable only when
+it differs from both.
+
+## The verbs
+
+| Task | `resident` | `on-demand` |
+| --- | --- | --- |
+| `task agents -- <name>` | make sure it runs (start it, or wake a stopped one with its conversation), then attach | a new session in its folder, in this terminal |
+| `task agents -- <name> --resume` | the same | resume its latest conversation (refused while that one runs) |
+| `task agents -- <name> --new` | stop the running session and start a fresh one, after a yes/no question (`--yes` skips it), then attach | the same as plain |
+| `task agents:up` | start every resident not running, attach none (the postStartCommand) | skipped |
+| `task agents:list` | name, kind, CLI, state (`running`, `stopped`, `failed`, `none`; `+N` extra running sessions; `unknown` when the CLI cannot list, `error` when listing failed, with the adapter's reason below the table and as `"error"` in `--json`), id, folder; a `NAME` column (the session name; the first column is then `HANDLE`) only when some agent's session name differs from its handle; `-- --json` for agents, always with `sessionName` | `running` with its id, else `none` (a stopped conversation is what `--resume` opens, not a state) |
+| `task agents:stop -- <name>` | stop it; the conversation is kept. `-- <name> --extras` stops only the extra sessions | stop a running one, if the adapter can |
+| `task agents:logs -- <name>` | recent output | recent output, if it ran in the background |
+| `task agents:check` | read and check the list, print it | the same |
+| `task agents:reset -- <name>... \| --all` | keep its running session, stop the others (conversations kept), record it again, start it if none runs; `--purge` also removes its ended sessions. A dry run unless `--yes` (below) | the same, nothing started |
+| `task agents:leases` | every lease: handle, state (`held`, `starting`, `stale`, `unknown`), carrier, since, holder; `-- --json` | the same |
+| `task agents:release -- <name>` | free a lease whose holder is gone; `--force` also a live one (a second copy may then start) | the same |
+| `task agents` (no name) | the agent marked `default: true`, as if named | the same |
+| `task agents:version` | the Feature version and the list in use | |
+
+Extra CLI flags follow the name: `task agents -- reviewer --effort high`; after `--` everything
+goes to the CLI, even `--resume`. They come after the list's `args`.
+
+**No terminal.** `task agents` is `interactive: true`. When stdin or stdout is not a terminal (an
+agent or a script calls it), a resident is made to run and the command prints how to attach
+(exit 0); an on-demand agent is refused (exit 2), because a new interactive session without a
+terminal is never what was meant. `--new` on a running resident without a terminal is refused
+unless `--yes`.
+
+**Two sessions for one agent** (a crash, a restore, Claude Code numbering a collision `host (2)`):
+the newest is the agent's; the others are reported, never stopped on their own. `task
+agents:stop -- <name> --extras` stops them.
+
+**At container start** `agents up --post-start` first waits until the CLI's session list settles
+(a CLI may restore background sessions after a rebuild; starting in that window makes copies):
+two reads `AGENTS_SETTLE_INTERVAL` seconds apart (default 3) with the same running sessions, at
+most `AGENTS_SETTLE_TIMEOUT` (default 30). Then each resident found stopped or failed is woken by
+id and the rest are started. It never fails the container start: a missing list is one line, a
+start that fails is said and the start goes on. `task agents:up -- --no-wait` skips the wait.
+
+Exit codes of `agents`: 0 done, 1 failed, 2 bad use (unknown agent, broken or missing list,
+refused), 3 the CLI cannot do it.
+
+## Session names (2.1)
+
+The **handle** (the agent's `name`) stays the address: it keys the lease, the CLI adapter's record
+and every verb (`agents stop host`). The **session name** is only the label the CLI shows for the
+agent's session (in Claude Code, the name in its remote view and `/resume`). Several agents called
+`host` on several machines are told apart by a template.
+
+```yaml
+agents:
+  - name: host
+    cli: claude
+    session-name: "{machine} {handle}"   # wins over the option
+```
+
+| Where | How |
+| --- | --- |
+| the Feature option `sessionName` | `"agents": { "sessionName": "{machine} {handle}" }`; default `{handle}`, which shows the handle exactly as before 2.1 |
+| `AGENTS_SESSION_NAME` | overrides the option like every setting (NFR-6): the task variable, the root `.env`, `.devcontainer/.env`, the environment, then the option |
+| the key `session-name:` | one agent's own template; wins over all of the above |
+
+| Variable | Value |
+| --- | --- |
+| `{handle}` | the agent's name |
+| `{repo}` | the name of the repository folder (the folder holding `.devcontainer`) |
+| `{machine}` | the workstation's name, `DCF_HOST_MACHINE` (set by the devcontainer-cli launcher, 1.16.2, and passed by `containerEnv`); the word `container` when it is unset or empty, because the container's own hostname changes at every rebuild |
+
+Everything else in a template is free text: letters, digits, space and `. _ : @ / ( ) -`. A
+variable's value is cut to the same set, every other character becoming `-` (`NABIL'S PC` renders
+`NABIL-S PC`). A tab, quote, backslash, `$` or any other character, an unknown or unclosed `{...}`,
+a stray `}` and `{run}` (reserved for ephemeral runs, a later 2.x) are refused. The rendered name is
+at most **60 characters**; a longer one is refused, never cut (a cut name can collide, and which
+end is lost would surprise). That limit is this repository's choice, not a CLI's: Claude Code's
+documentation of `--name` gives no limit, and 60 is short enough for one line of the remote view
+with room for the ` (2)` Claude Code appends to a collision. Two agents of one CLI and folder
+whose names (or one's name and the other's handle) are equal are refused too, since the adapter
+finds sessions by name and folder.
+
+`agents check` and every verb refuse a list that does not render, naming the file and line of the
+key (for the option or the environment, the entry). `agents check` shows the name of every agent
+whose differs from its handle, and warns when `{machine}` is used while `DCF_HOST_MACHINE` is unset.
+
+**What the CLI adapter gets.** The rendered name in the environment variable `AGENT_SESSION_NAME`,
+on every call about that agent (`start-bg`, `wake`, `new`, `resume`, `attach`, `stop`, `logs`,
+`record`, `hint`) and an **empty** `AGENT_SESSION_NAME` on every other call (`list`, `supports`,
+`session-busy`, `session-stop`, `session-remove`), so a value a parent session passed down never
+reaches a child's call. The arguments `<verb> <name> <folder>` do not change: `<name>` is still
+the handle, and an adapter that does not read the variable simply starts the CLI as before (the
+NFR-12 fallback: the CLI keeps its own title). There is deliberately no `supports` capability for
+it: `supports` lists verbs, and a variable cannot answer exit 3. Which CLIs use the name is each
+adapter's business (claude-code 1.9.0 and later passes it as `--name`; Copilot's `-n` and OpenCode's
+`--title` can follow). A session is the agent's when its name is the handle or the rendered name,
+with or without a collision number; the adapter's `list` still reports a recorded session under
+its handle.
+
+**Changing the template.** A changed name applies to the sessions started from then on; a session
+that exists keeps its name and is never copied to rename it (there is no rename verb). The Claude
+CLI adapter finds the agent's session by its record whatever its name is.
+
+## The lease (2.0)
+
+A stateful agent runs as exactly one live copy. Every start path through `agents` (`start`,
+`--new`, `up`, `reset`'s start of a resident) takes the agent's lease first; `list`, `logs`,
+`check`, `leases` and `release` take nothing.
+
+```
+start of a stateful agent h
+  mkdir leases/h ok? -- yes --> write holder (starting) --> start --> holder: held, carrier
+        | no
+  read holder: dead? -- yes --> takeover lock, re-read, still dead: replace the holder --> as above
+        | starting: wait up to AGENTS_LEASE_WAIT (20 s), then as held
+        | held
+  resident: join (attach; no terminal: "h: running (id)", exit 0)
+  on-demand: refuse, exit 2, naming the holder, agents:release and lifecycle: ephemeral
+```
+
+- **Where.** `/var/lib/devcontainer-features/agents/leases/<name>/holder` (key=value lines:
+  `state`, `pid`, `pidstart`, `boot`, `container`, `carrier`, `time`), written to a temporary
+  name and linked in (a new lease: `ln`, which fails if a holder got there first) or renamed over
+  (an update, a takeover). Folders are mode 0777 without the sticky bit, so a dead holder of another user
+  (root at post-start, the remote user in a terminal) can be taken over; the container is
+  single-tenant. A lease is keyed by name, not by list.
+- **Dead or alive**, the first rule that applies: no holder file and the folder older than 5 s:
+  dead (younger: starting); another container start (`boot`, the start of PID 1, the key the
+  markers already use, so `docker restart` counts) or another `container` (the hostname): dead;
+  `starting`: alive while its pid is (with the same start time; a reused pid is dead); `held`:
+  alive while its pid is (a foreground session's wrapper) or the adapter's `list` shows the agent
+  running, by name and folder (so a session id changed by `/clear` is still the agent); the
+  adapter cannot list (exit 3) and no live pid: **cannot tell**, never taken over (the next
+  container start frees it, or `agents:release -- <name> --force`); the listing failed: nothing
+  taken on a guess (exit 1, as 1.x). That is NFR-12: liveness through the CLI adapter's list when
+  it has one, else the Feature's own record (the holder's pid).
+- **Takeover** is serialised by `leases/<name>.takeover`, a symlink naming its taker's pid and
+  start time (`ln -s` makes it with its owner in one step). It is cleared only when that taker is
+  gone, never because a wait was long (a 2.0.0 lock folder without a pid, after 5 s). The taker
+  re-reads the holder and, only if it is still dead, claims the lease in place: its holder file
+  replaces the dead one (a folder without one: linked in). The folder never goes away during a
+  takeover, so no plain `mkdir` can slip in between. A holder judged dead because its pid is gone
+  is read once more and must be unchanged, since a live holder writes its next state (held, its
+  session) before it exits. A takeover that finds the agent running (restored by the CLI after a restart)
+  adopts it: nothing is started.
+- **Held** by a resident's background session after the starting process exits (carrier
+  `session:<id>`), and by the `agents start` process of an on-demand agent for the session's life
+  (carrier `process:<pid>`; it waits for the session and releases on exit, `TERM` and `HUP`; an
+  interrupt goes to the session). A resident whose CLI has no background mode runs in the
+  terminal and holds it the same way.
+- **Released** by `agents stop` after the adapter stopped the session (not `--extras`), by the
+  foreground wrapper's exit, by a failed start, by `agents release` (dead holder; `--force` a live
+  one), and by a takeover. A session started by hand, outside `agents`, never takes a lease; the
+  duplicate report (`+N`, `--extras`) stays the backstop for those.
+- **At container start** `agents up` never refuses and never fails: a held lease means running
+  (one line, `h: running (id)`); a stale one (the old container start) is taken over and the
+  resident started or adopted.
+- **Several takers of one dead lease at once** start exactly one session: one claims the lease
+  under the lock and prints "its lease was stale" (exactly one line), the others find it starting
+  and join or are refused.
+
+## Reset (1.0.1, output fixed in 1.0.2)
+
+`task agents:reset -- <name>... | --all [--purge] [--include-unlisted] [--yes] [--force]` puts the listed agents'
+sessions in order, from a container terminal:
+
+- **Per agent:** its running session is kept (the one `task agents -- <name>` would attach: the adapter's recorded one
+  first), every other running session of it is stopped (`claude stop`, conversation kept), the adapter records the kept
+  one again, and a resident left with none running is started (woken with its latest conversation, or fresh).
+- **`--purge`** also removes the agent's ended sessions (`claude rm`; Claude Code keeps the transcript and a worktree
+  with unpushed work, and says so), so it starts from scratch. Continuity is then what the repository records, not the
+  conversation.
+- **Scope:** only the agents in the list and their folders, never every session the CLI knows (another repository's
+  sessions in the same container are not looked at). A session in those folders that belongs to no listed agent is
+  reported as `untouched`; `--include-unlisted` treats it like a duplicate (stopped; removed with `--purge`).
+- **A dry run by default:** the plan, one line per session (agent, session id, state, action, why), and nothing
+  changed. `--yes` applies it; on a terminal it asks instead.
+- **Refused, unless `--force`:**
+  - stopping a session that is mid-turn right now (the adapter's `session-busy`; Claude Code: status `busy` or state
+    `working`; idle, waiting for input or blocked on a decision is not busy). The plan names the session. An adapter
+    that cannot tell counts it as not busy and says so;
+  - with `--purge`, removing a session (its conversation) where the folder has uncommitted changes (`git status`,
+    tracked files). On a plain reset, and for the stops of a purge, uncommitted changes are a warning in the plan;
+  - any stop or removal from inside a Claude Code session (`CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets for
+    its tools' commands), which may be one it would stop: run it from a container terminal or `task
+    devcontainer:shell`.
+- **Exit codes:** 0 done, 1 something failed (a stop, removal or start that errored), 2 a refusal and nothing failed
+  (dry run or applied). When every action was refused the summary says how many ("1 refused (see above); nothing else
+  to stop, remove or start."); "nothing to stop, remove or start." means nothing was refused either. The AGENT column
+  is as wide as the longest name in the plan (16 at least; an unlisted session shows as `(name)`).
+- An adapter without the optional verbs: `session-busy` missing counts as not busy (said);
+  `session-stop` missing leaves the duplicate running (said, exit 1);
+  `session-remove` missing skips `--purge` with a note; `record` missing is skipped.
+
+## The component registry at an agent's start (participant 1.2.0)
+
+When the `component-registry` Feature is installed (`dcf-registry` on PATH) and its layer list
+exists, `agents start` and `agents up` do these for each agent before its CLI starts
+(ADR-0064):
+
+1. `dcf-registry resolve`, `--as` the entry's `registry-path`, else for
+   `COMPONENT_REGISTRY_WHOAMI`. Once per path in one run (`agents up` with several agents), and
+   again when another path's resolve came in between (participant 1.3.0).
+2. `dcf-registry handover <cli> <name> <folder>` (`--as` the `registry-path` and `--skills-mode`,
+   participant 1.4.0), which asks the adapter's `supports` for `skills` and, when listed, calls
+   `agent-adapter-<cli> skills <name> <folder>` with that path's resolved skills folder in
+   `COMPONENT_REGISTRY_SKILLS`.
+3. (participant 1.3.0, component-registry 1.6.0) the agent's **definition**: `resolve` is handed
+   the listed agents' names and CLIs (`COMPONENT_REGISTRY_AGENTS`, `name:cli`; a layer's
+   `model.<cli>` is the model for agents of that CLI), and the resolved view's
+   `agents/<name>/` is read when the view is for the agent's path. Its `model` reaches the adapter
+   in `AGENT_MODEL` (the adapter contract, below), and the adapter uses it in place of a model the
+   CLI arguments choose; its `skills` replace the entry's `skills`. The registry wins for these two
+   fields (the Operator's ruling of 2026-11-21), the list fills what it leaves unset, and it sets
+   nothing else (not the identity, lease, folder, `args`, `definition` or any permission). One line says
+   what was used and from which layers; `agents check` shows it, `agents list --json` adds
+   `"model"`.
+
+The key `registry-skills: split | shared | off` (participant 1.4.0, ADR-0074) says how the CLI keeps
+the agent's skills; without it `COMPONENT_REGISTRY_SKILLS_MODE` (task variable, `.env`,
+`.devcontainer/.env`, environment), else `split`. `split`: what every agent's view has alike is
+shared, the rest is the agent's own; `shared`: its whole view shared, the latest start wins; `off`:
+no resolve and no hand-over for it, its own copies dropped. `agents check` prints each agent's mode,
+where it came from and, when the adapter has the read-only `skills-show` verb, its own folder and
+skills.
+
+`agents up` (participant 1.4.0) first forgets (`dcf-registry forget`) every agent of this
+repository the registry handed skills to that is no longer in the list.
+
+Resolve and the hand-over together wait at most `COMPONENT_REGISTRY_START_WAIT` seconds per agent (default 15; a
+whole number, a bad value means 15), a layer fetch that hangs and the wait for another resolve's
+lock included: each runs under `timeout`, which stops the whole process group (a git fetch too),
+and the lock wait is capped to what is left. Past the limit the CLI starts with the last good
+skills already in its skills folder, and one line says so (`did not resolve within 15s`);
+`/registry-refresh` keeps `COMPONENT_REGISTRY_LOCK_WAIT` and hands the new skills over later.
+
+It never blocks a start (NFR-12). Each case is one line, and the agent starts with the skills it
+has: no layer list (`the component registry has no layer list`), a failed resolve (the reason, for
+example no who-you-are path), a CLI whose adapter has no `skills` verb (`takes no resolved
+skills`), a hand-over that fails. Without `dcf-registry` nothing is run or said. Each path keeps
+its own resolved view (component-registry 1.8.0), and a CLI whose adapter keeps an agent's own skills
+apart (Claude Code from claude-code 1.14.0: an added directory per agent) gives two agents with
+different `registry-path`s each their own skills ([ADR-0074](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/adr/0074-each-agent-reads-the-skills-its-registry-path-resolves-through-an-added-directory-and-the-personal-folder-keeps-what-every-agent-shares.md)).
+
+## The adapter contract
+
+Each CLI Feature installs one executable on PATH, `agent-adapter-<cli>`; `agents` calls it,
+nothing else does. A list entry whose adapter is missing is an error naming the program and the
+Feature to add.
+
+```
+agent-adapter-<cli> <verb> <name> <folder> [--extras] [-- args...]
+  start-bg   start the agent in the background in <folder> (a fresh session); print its id
+  wake       bring the agent's stopped or failed session back in the background, same conversation;
+             print the id of the session that runs (a new one when the CLI started a copy, or a
+             fresh session because the old one is gone)
+  attach     open the agent's running session in this terminal
+  resume     open the agent's latest conversation in this terminal
+  new        open a new conversation in this terminal
+  stop       stop the agent (--extras: only its extra sessions); keep the conversation
+  logs       print recent output
+agent-adapter-<cli> list       one line per session of this CLI, newest first:
+                               name<TAB>id<TAB>state<TAB>folder (state: running | stopped | failed)
+agent-adapter-<cli> hint <name> <folder>
+                               optional: how to find and resume the agent by hand, printed when
+                               its list fails (exit 3 or missing: a general line instead)
+agent-adapter-<cli> <verb> <name> <folder>, optional (exit 3 or missing: skipped):
+  record                       record the agent's running session as the agent's, or clear its record
+  skills                       (ADR-0064) copy the component registry's resolved skills, the folder
+                               in COMPONENT_REGISTRY_SKILLS, into the CLI's own skills folder, marked
+                               as owned by the registry; remove owned copies no longer resolved;
+                               never touch a skill it does not own, never the repository's skills
+                               folder; create the skills folder even when empty; idempotent. Called
+                               by dcf-registry handover only when supports lists it; exit 3 or not
+                               listed: the CLI keeps its plain skills, said in one line.
+                               (ADR-0074) COMPONENT_REGISTRY_PATH names the path of that view; where
+                               a CLI can, it keeps each agent's skills apart and has the agent's
+                               sessions read them; COMPONENT_REGISTRY_FORGET=1 (no
+                               COMPONENT_REGISTRY_SKILLS) drops the agent's own copies
+agent-adapter-<cli> session-busy <id>     exit 0 mid-turn now, 1 not (idle, waiting, ended), 3 cannot tell
+agent-adapter-<cli> session-stop <id>     stop that session (the id `list` printed); conversation kept
+agent-adapter-<cli> session-remove <id>   remove that ended session from the CLI's list
+agent-adapter-<cli> supports   the verbs it supports, one per line
+Exit: 0 done, 1 failed, 2 bad use, 3 not supported by this CLI.
+Environment (2.1): AGENT_SESSION_NAME is the rendered session name on every call about the agent
+(an adapter that can name a session uses it, else the handle) and empty on the others (Session names).
+Environment (participant 1.3.0): AGENT_MODEL is the model of the agent's definition in the component
+registry on every call about the agent, empty on the others and without a definition. An adapter
+that can choose a model passes it on the verbs that start a session, in place of a model the CLI
+arguments choose; one that does not read it starts the CLI on its own default (no supports
+capability: a variable cannot answer exit 3). claude-code 1.13.0 and copilot 0.2.0 pass it as --model.
+```
+
+`<folder>` is absolute. A session is the agent's when its folder is the agent's and its name is
+the agent's name, or that name with a collision number (`host (2)`). Identity is the name: the
+adapter tags each session with it and finds it again by name and folder, so no id is written into
+the repository.
+
+When an adapter answers exit 3, the verb falls back, says so in one line, and never starts a
+second copy of something that may be running:
+
+| Not supported | Fallback |
+| --- | --- |
+| `start-bg` | the resident runs as on-demand: plain start opens `new`; `agents:up` skips it |
+| `wake` | a fresh `start-bg` |
+| `attach` | its `logs` and the reason; exit 1 |
+| `resume` | `new` |
+| `list` | the agent counts as not running; a resident is started at most once per container start (a marker under `/var/lib/devcontainer-features/agents`, keyed by the start of the container's PID 1), and the verb says that "make sure it runs" cannot be promised |
+| `stop`, `logs` | say so; exit 3 |
+
+**When `list` fails** (any exit but 0 and 3: the CLI is there but its list could not be read) it is
+not "cannot list": the agent's state is `error`, and nothing is started on a guess, since the agent
+may be running or have a conversation to resume. `task agents -- <name>` and `agents:up` start no
+resident, say the adapter's reason, print how to resume by hand (the adapter's `hint`, for Claude
+Code `claude agents` and `cd <folder> && claude --resume`) and exit 1 (`agents up --post-start` still
+lets the container start go on). An on-demand plain start opens a new session as always; `--resume`
+never turns into a new session (Claude Code's adapter opens its own picker instead).
+
+## State
+
+None that must survive a rebuild (NFR-1): the agents are the CLIs' own sessions, kept in each
+CLI's state (claude-code's volume at `CLAUDE_CONFIG_DIR`). `/var/lib/devcontainer-features/agents`
+(mode 1777, created at install, not a volume) holds the once-per-container-start markers of the
+`list` fallback and, from 2.0, `leases/` (mode 0777); `AGENTS_STATE_DIR` points elsewhere.
+
+**Reasoned exception to NFR-1 for the leases.** NFR-1 asks a Feature to keep state that must
+survive in a volume. A lease must not survive: one that outlived a rebuild would be stale by
+definition, so a volume would be the wrong default. A plain restart keeps the writable layer, so
+the holder records the container start (`boot`) and the hostname, and either differing makes the
+holder dead. A repository may bind-mount the folder (NFR-1 allows it); the same check covers that.
+
+## Options
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `sessionName` | `{handle}` | The session name template for every agent without its own `session-name:` (Session names). The default shows the handle, as before 2.1. |
+| `installTaskfile` | `true` | Register `taskfile.yml` with the go-task Feature's registry, so `task agents*` exist. Turn it off only if you call `agents` directly. |
+
+No option for the list's path: `AGENTS_FILE` is the one setting (above). `sessionName` is written at install to `/usr/local/share/agents-feature/session-name`; `AGENTS_SESSION_NAME` overrides it.
+
+## Minimal `devcontainer.json`
+
+```json
+"features": {
+  "ghcr.io/nabil-becker/devcontainer-features/go-task:1": {},
+  "ghcr.io/nabil-becker/devcontainer-features/claude-code:1": {},
+  "ghcr.io/nabil-becker/devcontainer-features/agents:2": {}
+}
+```
+
+plus `.devcontainer/agents.yml` and the go-task registry include in the root Taskfile (the go-task
+Feature's notes).
+
+## Verify it works
+
+```
+$ task agents:check
+agents: /workspaces/myrepo/.devcontainer/agents.yml (from the default (AGENTS_FILE is not set)): 1 agent(s), default host (agents with no name starts it)
+  host: cli claude, on-demand, stateful (identity host, lease container), folder ., args: [--remote-control]
+$ task agents:list
+NAME             KIND       LIFECYCLE  CLI      STATE     LEASE                    ID                                     FOLDER
+host             on-demand  stateful   claude   none      free                     -                                      .
+$ task agents:leases
+HANDLE           STATE      CARRIER                  SINCE     HOLDER
+agents: no lease is held.
+```
+
+The post-start log shows one line per agent (`host: on-demand, not started`, `reviewer: started in
+the background (...)`).
+
+## Pairs with
+
+- **An adapter per CLI**, from that CLI's Feature: `claude-code` 1.7.0 or later for `cli: claude`.
+  `agents` names no CLI Feature in `dependsOn`; it finds adapters on PATH.
+- **go-task** for the tasks (the `agents:` namespace; `task agents` is its default task).
+- **devcontainer-cli** 1.13.0 or later on the host: `task devcontainer:agent -- <name> [flags]`
+  and `task devcontainer:agent:list` run the same verbs in the container, starting it first.
+
+## Limits
+
+- The YAML subset above; anything else is refused with its line.
+- `agents:up` at container start waits up to `AGENTS_SETTLE_TIMEOUT` seconds when a resident's
+  CLI can list sessions.
+- A resident whose folder the CLI has never trusted fails to start (Claude Code: `Workspace not
+  trusted`; run `claude` there once and accept). The Feature does not mark folders trusted.
+- Whether Claude Code's Remote Control reaches a background session is not established; an agent
+  driven from a phone stays `on-demand` with `--remote-control` in its `args` until it is.
+- The lease is per container. `lease: machine` (a named volume shared by containers on one
+  engine) and `cluster` are refused in 2.0: there is no atomic step across containers in bash,
+  awk and sed, and across machines it needs a server (the framework's register), not this Feature.
+- The lease guards starts through `agents` only; `claude --bg --name <agent>` by hand takes none.
+- `AGENTS_LEASE_WAIT` (default 20 s) bounds the wait for a start in progress; a container start
+  with several residents waits at most that per agent held `starting`.
+- Agents of one CLI with different `registry-path`s keep their own skills only where the CLI's
+  adapter keeps them apart (Claude Code from claude-code 1.14.0, ADR-0074). A session not started
+  through `agents` reads only the skills every agent's view has alike, and in Claude Code a project
+  skill of the same name beats an agent's own copy (the registry's runs as `/registry:<name>`).
+- The start hook waits for `dcf-registry resolve` and the hand-over for at most
+  `COMPONENT_REGISTRY_START_WAIT` seconds (default 15) per agent; it never fails the start.
+- Tested with fake adapters and a fake `claude` (`task test:agents-unit`, `task
+  test:claude-unit`, `task test:agents-registry`); no live CLI in CI.
+
+## Anti-patterns
+
+### Don't start a stateful agent outside `agents`
+
+- **Don't:** start a resident or on-demand agent by hand (`claude --bg --name <agent>`) or add your own locking around the start.
+- **Why:** the lease guards starts through `agents` only (see "Limits"), and it exists because the published 2.0.0 had three races in its own lock: 2026-10-30, "Lease takeover fix agents 2.0.2 merged (PR #122)", found through a flaky concurrency test.
+- **Instead:** start through `agents` (`task agents`, `agents:up`), and free a lease with `task agents:release -- <name>` (`--force` only for a live holder you mean to take over).
+- **Caught by:** `task test:agents-lease` covers the lease itself; a session started by hand is not prevented, only shown afterwards by the duplicate report (`+N`, `agents stop --extras`). Nothing stops it yet.
+
+### Don't name a CLI in the vendor-neutral Feature
+
+- **Don't:** special-case one CLI by name in `agents` (or in an adapter's callers), or put a vendor feature such as Remote Control into the `agents` spec.
+- **Why:** 2026-10-29, "Design split agreed: Remote Control in the Claude adapter, session names in the agents spec", and 2026-10-29, "Contract test suite for agents adapters, two fake CLIs": a contract that works on one vendor only is not a contract.
+- **Instead:** each adapter chooses its own route; `agents` asks `supports` ("can it") and relies on the verb's exit code (3: not supported) at run time, with the documented fallback.
+- **Caught by:** `task test:agents-contract` (it fails when a list using only the second fake CLI runs anything named `claude`, and greps that the participant component, `components/participant`, names `claude` only in its documented places); ADR 0037.
+
+## Why it exists
+
+Claude Code's own agent view (`claude agents`) lists sessions, but it has no per-repository list,
+no kinds and no way to say "this one always runs"; other agent CLIs have nothing of the kind, and
+no published Feature offers one (NFR-9). The list, the kinds and the verbs belong to no single CLI,
+so they live here and each CLI Feature adds only its adapter.
+
+## Version and upgrade
+
+`ghcr.io/nabil-becker/devcontainer-features/agents:2` follows 2.x; rebuild to update. `agents:1` never
+moves to 2 on its own. 2.2.0 deprecates the Feature (above); 2.x after it takes bug fixes only, and
+new keys land in the participant component, which claude-code `participants: true` installs.
+
+**What 2.x holds so far.** 2.0 brings the lease and the `default` agent; 2.1 brings session names (the `sessionName` option and the `session-name:` key, with `AGENT_SESSION_NAME` handed to every CLI adapter call). The rest of version 2 arrives in steps (docs/proposals/agents-v2.md, section 12): agent integrations in 2.2 and ephemeral runs in 2.3. The Claude CLI adapter maps the session name onto `--name` in claude-code 1.9; passing `definition` (as `--agent`) follows in a later claude-code minor. Until then `definition` is stored and shown, and a start that sets it says it is not passed on yet.
+
+### 1.x
+
+1.0.0 is the first release. 1.0.3: see the CHANGELOG. 1.0.2: `agents reset` output fixes: the keep reason is a full sentence, the AGENT column fits the longest
+name, a refusal exits 2 (1 stays for a failure) and is counted in the summary; pair it with claude-code 1.8.1, whose
+`session-remove` prints one line instead of two. 1.0.1: `task agents:reset` (above); a `list` that fails is state `error` and starts nothing (it showed `unknown`
+and started residents as fresh sessions), with the adapter's reason and how to resume by hand; an
+on-demand agent shows `none` unless a session runs (it showed yesterday's stopped one). Pair it with
+claude-code 1.8.0, whose adapter reads the list sturdily and gives the reason and the hint, and finds an agent
+again after Claude Code retitles its session (with 1.7.0 a retitled resident looked stopped and was started a second
+time; `/rename <agent name>` in that session was the workaround and is no longer needed). It replaces claude-code's `claude-host`, `claude-fleet` and `claude-host-pin` and
+the `SESSIONS` / `HOST_SESSION` settings, which claude-code 2.0 removes; the migration is in
+[docs/migrations/agents.md](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/migrations/agents.md).

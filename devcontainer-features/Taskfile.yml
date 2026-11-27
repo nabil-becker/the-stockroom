@@ -1,0 +1,714 @@
+version: '3'
+
+vars:
+  TEST_IMAGE: '{{.IMAGE | default "mcr.microsoft.com/devcontainers/base:debian"}}'
+
+tasks:
+  default:
+    silent: true
+    cmds:
+      - task --list
+
+  test:
+    desc: 'Test one published Feature (FEATURE=go-task) or the collection. IMAGE overrides the base image; SCENARIOS=false skips scenarios.json. Requires Docker and the devcontainer CLI.'
+    platforms: [linux, darwin]
+    vars:
+      FEATURE: '{{.FEATURE | default ""}}'
+      SCENARIOS: '{{.SCENARIOS | default "true"}}'
+    preconditions:
+      - sh: docker info >/dev/null 2>&1
+        msg: 'no Docker daemon here; Feature tests run in CI on every PR, or locally with Docker Desktop on the workstation'
+    cmds:
+      - bash .devcontainer/dind-guard.sh
+      - devcontainer features test -p . -i {{shellQuote .TEST_IMAGE}} --skip-duplicated{{if .FEATURE}} -f {{shellQuote .FEATURE}}{{end}}{{if ne .SCENARIOS "true"}} --skip-scenarios{{end}} {{.CLI_ARGS}}
+
+  test:global:
+    desc: 'Test the published Features together using test/_global. Requires Docker and the devcontainer CLI.'
+    platforms: [linux, darwin]
+    preconditions:
+      - sh: docker info >/dev/null 2>&1
+        msg: 'no Docker daemon here; Feature tests run in CI on every PR, or locally with Docker Desktop on the workstation'
+    cmds:
+      - bash .devcontainer/dind-guard.sh
+      - devcontainer features test -p . --global-scenarios-only
+
+  docs:
+    desc: 'Regenerate src/<id>/README.md from each devcontainer-feature.json + NOTES.md with `devcontainer features generate-docs`, then add its "Changes" section (the latest 3 entries of src/<id>/CHANGELOG.md and a link to the file; .github/scripts/changelog.py render). Run after changing either, or a CHANGELOG, changing either and commit the result; CI (lint) fails when a README is stale.'
+    # Relative -p on purpose: the CLI embeds the given path in each README's
+    # footer link, so an absolute path would leak the local checkout path.
+    dir: '{{.TASKFILE_DIR}}/..'
+    cmds:
+      - devcontainer features generate-docs -p devcontainer-features/src -n nabil-becker/devcontainer-features --github-owner nabil-becker --github-repo the-stockroom
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/changelog.py' render
+
+  docs:check:
+    desc: 'Fail if any src/<id>/README.md in the working tree differs from what `task docs` generates (the check CI runs). Compares before/after regeneration, so it works on uncommitted changes too.'
+    dir: '{{.TASKFILE_DIR}}'
+    cmds:
+      - cmd: |
+          snapshot() { for f in src/*/README.md; do [ -f "$f" ] && printf '%s ' "$f" && sha256sum < "$f"; done; }
+          before="$(snapshot)"
+          task docs >/dev/null
+          after="$(snapshot)"
+          if [ "$before" != "$after" ]; then
+            echo "src/<id>/README.md was stale - regenerated now; review and commit:"; git status --short -- 'src/*/README.md'; exit 1
+          fi
+          echo "generated READMEs are up to date"
+
+  lint:
+    desc: 'shellcheck, yamllint, PSScriptAnalyzer, the vendored-helper and toolchain checks, the Feature version literals in container tests (versions:check), and every Docker-free unit test (test:*-unit and friends; see each task''s desc). CI runs exactly this inside .devcontainer/ci; the tools must be installed - this repo''s devcontainer has them, at the pinned versions.'
+    cmds:
+      - printf '%s\0' .github/scripts/*.sh src/*/*.sh bundles/*/*.sh components/*/*.sh test/*/*.sh test/*/unit/*.sh test/bootstrap/*.sh bootstrap/*.sh bootstrap/host/*.sh .githooks/* .devcontainer/*.sh | xargs -0 -n 12 shellcheck -x
+      - yamllint --strict .
+      - task: lint:toolchain
+      - pwsh -NoLogo -NoProfile -File '{{.TASKFILE_DIR}}/.github/scripts/Invoke-PSScriptAnalyzer.ps1'
+      - task: common:check
+      - task: components:check
+      - task: common:curl-check
+      - task: signpacket:check
+      - task: registerengine:check
+      - task: bundle:check
+      - task: taskfiles:check
+      - task: versions:check
+      - task: changelog:check
+      - task: how-it-fits:check
+      - task: architectures:check
+      - task: test:architectures
+      - task: test:common-unit
+      - task: test:go-task-unit
+      - task: test:git-unit
+      - task: test:bootstrap
+      - task: test:shutdown
+      - task: test:psscriptanalyzer-files
+      - task: test:host-type
+      - task: test:engine-wait
+      - task: test:build-lock
+      - task: test:bootstrap-dir
+      - task: test:host-mounts
+      - task: test:dind-clean
+      - task: test:ssh-key-import
+      - task: test:ssh-agent-unit
+      - task: test:openbao-unit
+      - task: test:gh-unit
+      - task: test:cloud-folder-unit
+      - task: test:cloud-folder-login
+      - task: test:agents-unit
+      - task: test:participant-unit
+      - task: test:agents-contract
+      - task: test:agents-lease
+      - task: test:agents-registry
+      - task: test:claude-unit
+      - task: test:copilot-unit
+      - task: test:phi-check-unit
+      - task: test:audio-unit
+      - task: test:sign-packet-unit
+      - task: test:register-engine-unit
+      - task: test:packet-relay-unit
+      - task: test:component-registry-unit
+      - task: test:registry-first-use
+      - task: test:facilitator-unit
+      - task: test:claude-fleet-task
+      - task: test:agent-task
+
+  test:agents-contract:
+    desc: 'Docker-free contract tests of the participant component (the agents command, components/participant; installed by claude-code participants: true or the deprecated agents Feature): the same scenarios against two fake adapters with different capabilities (fakea, Claude-like with background mode, wake, list, stop and logs; fakeb, minimal, with only new, resume and attach, every other verb answering exit 3): check on a mixed list, start of an on-demand agent on each (and refused without a terminal), --resume, a resident on each (attached on fakea, run as on-demand on fakeb with its one line, refused without a terminal), up (started, skipped, never twice), list and --json for an adapter with no list (unknown, not an error), stop and logs without the verb (exit 3), unsupported verbs asked once per command, and that a list using only fakeb never runs anything named claude (a fake claude and agent-adapter-claude log any call), plus a grep that the participant component (components/participant) names claude only in its documented places. Part of lint.'
+    cmds:
+      - bash test/agents/unit/contract_test.sh
+
+  test:participant-unit:
+    desc: 'Docker-free tests of the participant component''s installer (components/participant/install-participant.sh), every path moved into a temp folder: a first install (lib folder, the agents symlink, state folders and modes, the Taskfile include, installed-by, the go-task registry refreshed), a second Feature with the same version installing nothing (one copy), an older copy never replacing a newer one (1.10.0 beats 1.9.0), a newer one replacing an older, --taskfile false and a later caller adding only the include, usage refused; and that each src/<id>/participant copy equals the component. Part of lint.'
+    cmds:
+      - bash test/participant/unit/install_test.sh
+
+  test:agents-lease:
+    desc: 'Docker-free tests of the participant component''s 2.0 keys and lease (the agents command, components/participant): lifecycle, identity, lease, definition and default parsed, checked and shown (bad values refused with their line, the inline map pointing at the flat form, two stateful agents with one identity, definition with --agent, two defaults); a 1.x list read as stateful with an exclusive lease; eight concurrent starts of one stateful agent giving one copy (resident: one start, seven joins; on-demand: one session, seven refused; up racing start); a dead holder taken over, one case per liveness rule, never a live one, eight takers giving one winner, a stale takeover lock; cannot list (never taken over) and a failed listing (nothing taken); an ephemeral agent with no lease; release by stop, by the foreground wrapper on exit and on SIGTERM, and by agents release (--force for a live holder); leases and the LEASE column; the default agent from agents, agents start and task agents; part of lint.'
+    cmds:
+      - bash test/agents/unit/lease_test.sh
+
+  test:agents-registry:
+    desc: 'Docker-free tests of the participant component''s component-registry start hook (components/participant, participant 1.2.0, ADR-0064) against the real dcf-registry (src/component-registry, path layers) and two fake adapters (fakea takes skills, fakeb has no skills verb): the registry absent (nothing said or run), no layer list (one line, the agent starts), resolve failing (one line, the agent still starts, nothing handed over), skills handed over before the CLI starts (the resolved folder reaches the adapter), a CLI without the verb (one line, plain skills, the verb never called), the adapter''s skills verb failing (one line, the agent starts), the per-agent registry-path (parsed, shown by check, refused when relative, a pattern or twice, with file:line; resolved --as it), one resolve per path in agents up, on-demand agents too; the start limit COMPONENT_REGISTRY_START_WAIT (participant 1.2.0: the fast path, a hanging layer source stopped at the limit with no fetch left running, a lock held by another resolve not waited 120 s, a bad value); agent definitions (participant 1.3.0: resolve handed the listed agents, the model in AGENT_MODEL on the calls about the agent and empty on the others, each path its own model in agents up and a path resolved again after another, an adapter that ignores it, the registry''s skills and model replacing the list''s (a list skills: key, a --model in its args, said by the start line and check) and the list''s where the registry sets none, nothing read without a layer list or the registry, check and list --json, fake views). participant 1.4.0 (ADR-0074): the hand-over --as the agent''s own path with --skills-mode, a view kept per path, the records, an agent taken out of the list forgotten at agents up, registry-skills split, shared and off, the container default COMPONENT_REGISTRY_SKILLS_MODE and the key beating it, a bad value, check showing each agent''s mode, own folder and skills. Part of lint.'
+    cmds:
+      - bash test/agents/unit/registry_hook_test.sh
+
+  test:claude-unit:
+    desc: 'Docker-free tests of the claude-code Feature''s claude-host live-session rule (a running session, one with a pid, refuses a second copy; ended sessions never count; CLAUDE_HOST_ALLOW_SECOND; the stale-pin warning and CLAUDE_HOST_UPDATE_PIN; `claude agents --json` unavailable), of the claude-host-pin SessionStart hook (the right .env line, every other byte kept, never fails) of claude-fleet (running by id or by folder, unset variable, start with --bg in the folder, --plan, --no-view, the environment beating .env), the deprecation line of the three, and of agent-adapter-claude (list from `claude agents --json --all`, a session found by name and folder, every action by id, a stopped one woken with --bg --resume <session id>, never -c, never rm, resume refused while running, --extras; the list read past a notice line, a slow first read tried again, a quick error such as a wrapper''s said as it is and not retried, resume on an unreadable list opening Claude Code''s own picker, never a new session; the record of each agent''s session, so a retitled session is still found and never started twice, a /clear and a removed session resolved; session-stop, session-remove, record), and of claude-code-post-start (participants off: silent, nothing run; on: agents up --post-start once, never fatal; left to the agents Feature''s own hook when that Feature is installed), of the additionalDirectories managed-settings drop-in (empty, one, several, a space in a path, ~ expanded, re-run idempotent, a relative path refused), and of the adapter''s skills verb (1.12.0: the resolved skills copied into $CLAUDE_CONFIG_DIR/skills and marked owned, the folder created even when empty and said new, idempotent, a changed skill replaced, an owned copy no longer resolved removed, an unowned skill never touched, never the repository .claude/skills, owner-only, bad use without COMPONENT_REGISTRY_SKILLS), and AGENT_MODEL (1.13.0: --model on start-bg, new and resume, an args --model or --model= winning, a wake bare, a value that is not one word left out); 1.14.0, ADR-0074: two agents of different paths split into the shared personal folder and each agent''s own folder, one path shared, a refresh that agrees again, a project clash said, forget, an agent whose folder is gone, two hand-overs at once, --add-dir on new and start-bg once and never without a folder, the start line and the clash line, the duplicate rule, skills-show, the modes split, shared and off; a fake claude on PATH answers `agents --json` and records the other calls; part of lint.'
+    cmds:
+      - bash test/claude-code/unit/live_session_test.sh
+      - bash test/claude-code/unit/adapter_test.sh
+      - bash test/claude-code/unit/additional_dirs_test.sh
+      - bash test/claude-code/unit/musl_test.sh
+      - bash test/claude-code/unit/post_start_test.sh
+      - bash test/claude-code/unit/skills_test.sh
+
+  test:copilot-unit:
+    desc: 'Docker-free tests of the copilot Feature''s agent-adapter-copilot (src/copilot) with a fake `copilot` and no login: new and resume (--name and --resume by session name, AGENT_SESSION_NAME or the handle, a tab falling back), run-once (the prompt from stdin as -p with --silent --no-ask-user --no-auto-update, args passed through, --allow-all-tools only when asked, an empty or over-long prompt refused, --session-id a stable UUID only with AGENT_ADAPTER_COPILOT_CONTINUE=1, copilot''s stdout and exit code kept), mcp-attach (remove then add through copilot mcp, no token or --env, idempotent, nothing with no facilitator on PATH, a missing copilot or other target refused, a private COPILOT_HOME made), every other verb exit 3, and supports agreeing with the verbs; AGENT_MODEL (0.2.0) as --model on new and resume in place of a --model or --model= in the args, said, a value that is not one word left out, run-once unchanged; skills (0.3.0, ADR-0077) in a temp COPILOT_HOME: bad use without COMPONENT_REGISTRY_SKILLS (nothing created), one agent''s view personal and marked owned, two views split into the shared personal folder and each agent''s own .github/skills, an unowned skill never touched, a project skill clash said, --add-dir its own folder last and once on new, resume and run-once and none without a folder, the start line, skills-show, shared, off and forget. The contract tests run the real adapter too (test:agents-contract).'
+    cmds:
+      - bash test/copilot/unit/adapter_test.sh
+
+  test:phi-check-unit:
+    desc: 'Docker-free tests of the phi-check Feature (src/phi-check): every rule with a positive and a near-miss case (never-issued SSN ranges, a lower-case MBI, an ICD code list, an NPI, a date, a name or a diagnosis word alone, an anchor outside the three-line window), no output line in any format holding the matched value, a binary or missing path failing closed, exit 2 on bad usage, the exceptions file skipping only the listed path and reporting a malformed line, --no-exceptions, standard input with --stdin-filename, the importable module; then a mutation check that three deliberately broken patterns each fail the suite; part of lint. Needs python3.'
+    cmds:
+      - bash test/phi-check/unit/phi_check_test.sh
+
+  test:sign-packet-unit:
+    desc: 'Docker-free tests of the sign-packet Feature (src/sign-packet): the packet format, its checks and order, forks and the vouched-absent rule, guards, the command (test_packet.py), the instance id from the environment, OpenBao or made here and recorded once (test_instance.py), and install.sh into a throwaway root with DESTDIR (test_feature.py); part of lint. Needs python3 and ssh-keygen.'
+    cmds:
+      - for t in test/sign-packet/unit/test_*.py; do echo "== $t"; python3 -I "$t" || exit 1; done
+  test:register-engine-unit:
+    desc: 'Docker-free tests of the register-engine Feature (src/register-engine): the engine with a ledger-like type given through the types folder (reading, refusals, forks, prunes, sync, the index, the change feed) and the types folder''s ownership rules (test_engine.py), format v3 and the 0.2.0 security review''s findings (test_v3.py), and install.sh into a throwaway root with DESTDIR, alone with its own copy of sign-packet''s library (test_feature.py); part of lint. Needs python3 and ssh-keygen.'
+    cmds:
+      - for t in test/register-engine/unit/test_*.py; do echo "== $t"; python3 -I "$t" || exit 1; done
+  test:facilitator-unit:
+    desc: 'Docker-free tests of the facilitator Feature (src/facilitator), every one on its own throwaway repository and state folder, keys in files, no SLIM (the poll transport): the routing rules, the addressed mentions, rule 3 to the asker (test_routing.py); the hop limit, continue, a person''s message counted as a hop with only continue resetting (option A), a new conversation a new root, the message budget, the rate, a stale participant held never dropped, say needing a human chain (test_guard.py); every packet its writer''s, verify on a good chain, a tampered packet, a wrong signer and a broken reply_to, its exit codes, keys and tokens mode 600 (test_record.py); the MCP protocol over stdio: initialize, tools/list, receive blocking and timing out, woken by a delivery, the token check, a cancelled receive taking nothing, a clean standard output (test_mcp.py); a person''s attachment: the human tools over MCP with FACILITATOR_HANDLE, mail never blocking and listing several unread by conversation, an agent refused continue and unable to be a person, mcp without a handle, the turn hook''s one line or nothing, never failing, snippet''s shared entry, chat, send and continue gone (test_person.py); the participant list, its alias agents.yml, facilitator.yml, the settings'' order, lean refused (test_participants.py); the two fake attachments, a fake MCP client and the model wrapper on a fake OpenAI-compatible endpoint, with a fake claude that must never run (test_attachments.py); the infrastructure with fake dirctl and slimctl: idempotent up, a crash said not restarted, down by pid, a port''s owner named, the configs on loopback (test_infra.py); install.sh into a throwaway root: the tree, the options, the refusals, a checksum that does not match (test_feature.py); mesh.yml, lock two, join tokens, agent-job refusals, ports and the configs per role (test_mesh.py); qualified handles @handle.node, a bare handle refused when it names several (test_qualified.py). Slice N5a (test_p2p.py, test_audit.py): role peer and preset open, a peer''s own CA and name-constrained certificates, pairing two peers by a token, a public node''s join request and a person''s approval (refused inside an agent''s job), lock two on a public card, what a public receiver is shown, copy addressed (the write rule, the check before sending), first contact for a public node''s agent, revoke and the mesh secret''s rotation, the signed audit register and its replay. MCP over HTTP, the node''s side (slice N4): the facilitator.http settings and what refuses them (solo, TLS, no approver, issuers), the client table (a token kept as a hash, revoke, the pending cap, the audit chain), http.<home domain> and the new mesh.yml keys, the reach rule, first-contact approval (held, shown in mail, released, 7 days, deny, the approval ttl); gate A in test_approval.py (first-contact at private as a fact, every-message and per-conversation: held in the record, mail, the turn hook line, approve and deny by a person only, the 7 days, the receiving node''s own answers, the audit register, verify, HTTP clients), the public limits, via in every packet and in transcript and verify, a client never a person, the commands refused inside an agent''s job (test_http.py); the endpoint over loopback with the mcp library when FACILITATOR_TEST_MCP_PYTHON names a python that has it, else skipped (test_http_endpoint.py). OAuth, slice N5b: http.issuers option by option (names, https, algorithms never none or HS*, scope, audience, http.url needed), an OAuth client''s table entry, handle, via and revoke (test_http.py), check naming the issuers without fetching them; and, with a python that has jwt, cryptography and mcp, a local test issuer: the right and wrong audience, expiry, issuer, scope, alg none, HS256 forged with the public key, a wrong key, a rotated kid, keys that cannot be read (closed, said), the endpoint''s 401, 403, 503 and the RFC 9728 metadata, enrolment, first-contact approval, via (test_oauth.py). Part of lint. Needs python3 3.11+, ssh-keygen and ssh-agent.'
+    cmds:
+      - for t in test/facilitator/unit/test_*.py; do echo "== $t"; python3 -I "$t" || exit 1; done
+
+  test:facilitator-integration:
+    desc: 'The jester flow on the real AGNTCY components (test/facilitator/integration/jester_flow.py): infra up twice, register (OASF records in the Directory), two fake agents and the person (FACILITATOR_HANDLE=you) through facilitator mcp over SLIM, the person''s say, the five messages routed by the rules (every mention delivered), every task completed, the person''s mail and transcript, the person''s next message held at the hop limit, continue, verify; everything stopped by pid. Needs an installed facilitator Feature (the jester_flow scenario runs it), or FACILITATOR_BIN, FACILITATOR_DIRCTL and FACILITATOR_SLIMCTL; not part of lint (it needs the 250 MB of AGNTCY binaries).'
+    cmds:
+      - python3 -I test/facilitator/integration/jester_flow.py
+
+  test:facilitator-image:
+    desc: 'The facilitator node image with the sample compose file (test/facilitator/node_image.sh): starts bundles/facilitator/compose.yml under a project of its own with the image facilitator-node:<version>-local (task bundle:build, then bundle:image, first): a hub (role hub from its mounted mesh.yml), a spoke and an OpenBao, sealed. Waits for the hub and the spoke to be healthy; checks the hub fails closed (no certificate while OpenBao is sealed, check says why, every port on loopback), the spoke standalone until it joins, both non-root, no port published to the host, the bundle''s MANIFEST.json, and that OpenBao answers from the hub over the compose network; then removes the containers, volumes and network. FACILITATOR_OPENBAO_IMAGE names another OpenBao image. Needs a Docker daemon with compose; not part of lint.'
+    cmds:
+      - bash test/facilitator/node_image.sh
+
+  test:facilitator-mesh:
+    desc: 'Slice N3 end to end in Docker (test/facilitator/mesh_flow.sh): an OpenBao (initialised and unsealed by the script, a PKI for corp.test whose intermediate is signed by a root kept outside it, an AppRole), a hub and two spokes on one internal network, every node the image facilitator-node:<version>-local (task bundle:build, then bundle:image, first). Join tokens (single use), a conversation from spoke A''s agent to spoke B''s through the hub with verify on both spokes, a local-only agent not listed, one handle on both spokes reached by qualified name and the bare one refused with both names, the Directory synced by registry, lock one refusing an untrusted CA, lock two refusing the spike''s impostor, the hub restarting, a held message, check naming a TLS refusal, a revoked spoke refused; removes every container, volume and network. FACILITATOR_TEST_OPENBAO names another OpenBao image. Needs a Docker daemon; not part of lint.'
+    cmds:
+      - bash test/facilitator/mesh_flow.sh
+
+  test:facilitator-p2p:
+    desc: 'Slice N5a end to end in Docker (test/facilitator/p2p_flow.sh): three peers with no hub (each the issuer of its own domain with a CA it keeps, paired by tokens) and a public node, every node the image facilitator-node:<version>-local (task bundle:build, then bundle:image, first). A conversation across the three with verify on each; the public node joins by its key and a person''s approval (refused inside an agent''s job), is shown only the agent exposed public, a conversation with it carries only what is addressed to it (a message to another member refused at the write, no other conversation on the public node), first contact held until a person approves, an agent not marked public unreachable and unlisted; revoke: no renewal, the public certificate (shortened to 60 s, FACILITATOR_TEST_PUBLIC_TTL) expires, the mesh secret rotates on the three nodes that remain, which keep talking; the audit register verifies and the N4 log is replayed into it; removes every container, volume and network. FACILITATOR_TEST_SOURCE=1 mounts this checkout''s application over the image''s. Needs a Docker daemon; not part of lint.'
+    cmds:
+      - bash test/facilitator/p2p_flow.sh
+
+  test:facilitator-k8s:
+    desc: 'The hub on Kubernetes end to end in a throwaway kind cluster (test/facilitator/k8s_flow.sh; kind, kubectl, kustomize and kubeconform pinned by version and SHA-256 in test/facilitator/k8s/tools.sh and fetched into a cache; the kind node image pinned by digest): the manifests rendered and checked (task bundle:k8s), the hub deployed from the base through the rancher-desktop overlay with the built-in issuer (the image facilitator-node:<version>-local, task bundle:build then bundle:image, loaded into the cluster), the hub''s pod hardened (uid 10001, read-only root, no capabilities) and its Service exposing SLIM and the join endpoint only; a spoke container reaching it through the machine (--add-host host-gateway, the published ports) joins with a token, an agent on the spoke and one on the hub converse, verify passes on both, check warns that the CA key is a file; export-root takes the root key out of the volume and the hub keeps issuing; then the ssh-agent overlay: a key loaded into the agent container beside the hub, a second spoke gets a certificate signed by it, a CA key file nowhere, the agent removed and issuing refused with a clear error while the issued certificate stays valid; deletes the cluster, containers and images it made. Needs a Docker daemon that allows --privileged; df and one cluster at a time; not part of lint.'
+    cmds:
+      - bash test/facilitator/k8s_flow.sh
+
+  test:facilitator-http:
+    desc: 'Slice N4 end to end, no Docker (test/facilitator/http_flow.sh): the endpoint of a built node bundle (FACILITATOR_BUNDLE, else dist/, else it builds one: task bundle:build) on 127.0.0.1 with a mesh.yml that exposes one agent public and one not; a leaf MCP client (401 without detail, 413, Origin, 404, the tools offered and never continue or approve, who showing only the public agent, a hidden agent refused as unknown, the first message held, approved by a person, answered, received, via in transcript and verify, max_packet and the public rate refused, a revoked token refused at once, ten failures blocking an address), then Claude Code and GitHub Copilot CLI run for real with a bearer token (skipped, said aloud, when the binary or its login is missing: COPILOT_BIN, GH_TOKEN; FACILITATOR_HTTP_CLIENTS=leaf runs only the leaf). Claude Code uses a small model (FACILITATOR_HTTP_CLAUDE_MODEL, default haiku). Not part of lint.'
+    cmds:
+      - bash test/facilitator/http_flow.sh
+
+  test:facilitator-oauth:
+    desc: 'Slice N5b end to end, no Docker (test/facilitator/oauth_flow.sh): the endpoint of a built node bundle (FACILITATOR_BUNDLE, else dist/, else it builds one: task bundle:build) on 127.0.0.1 as an OAuth resource server for two issuers, one a local test issuer the script starts (a key made on the spot, its JWKS and discovery document on loopback) and one whose keys cannot be read: no token (401 with resource_metadata), the RFC 9728 metadata, tokens of another audience, expired, from another issuer, alg none (401), the wrong scope (403), a token of the unreadable issuer (503, said in the log), check naming the issuers without fetching and http issuers fetching; then a leaf MCP client holding an OAuth token (who showing only the public agent, a hidden agent as unknown, the first message held, a person sees the client wait and approves, the agent answers, receive, reply, transcript and verify showing via oauth with issuer and subject, max_packet and the public rate refused), another subject another client, a bearer client beside, a revoked OAuth client refused at once and not brought back by a new token, the audit chain, no token in the logs or state. A real cloud AI cannot run here (NOTES, Connect a cloud AI). Not part of lint.'
+    cmds:
+      - bash test/facilitator/oauth_flow.sh
+
+  test:facilitator-oauth-local:
+    desc: 'The automatable part of facilitator:oauth-local (test/facilitator/oauth_local_check.sh; needs Docker, the internal context, and a bundle: FACILITATOR_BUNDLE or dist/): starts Keycloak 26.8.2 (pinned by digest) and the node, then does what Claude Code does at login without a browser: the 401 and the protected-resource metadata, dynamic client registration, authorization code with PKCE and the resource parameter (the login form posted), an RS256 JWT with aud = the node and scope facilitator:participate; calls the node with it (enrolled, held, approved, the test agent answers, verify shows via http (oauth, ...)) and takes everything down. Not part of lint.'
+    cmds:
+      - bash test/facilitator/oauth_local_check.sh
+
+  facilitator:oauth-local-k8s:
+    desc: 'The OAuth test (N5b) in the workstation''s Rancher Desktop Kubernetes (context rancher-desktop only; test/facilitator/oauth-local/oauth_local_k8s.sh): namespace facilitator-oauth-test with Keycloak, the hub of the rancher-desktop overlay with its HTTP endpoint (Keycloak the one issuer at http://localhost:8080, jwks_uri the in-cluster service) and the public test agent jester, Services of type LoadBalancer on 8080 and 8765 for Claude Code on Windows. Needs the image facilitator-node:<version>-local in that Docker (DOCKER_CONTEXT=host task bundle:image) and kustomize. Prints the test user''s throwaway password. Also: -- down (deletes the namespace), -- status, -- fx <facilitator args> (http list, http approve <handle>, verify --conv <id>).'
+    cmds:
+      - bash test/facilitator/oauth-local/oauth_local_k8s.sh {{.CLI_ARGS}}
+
+  facilitator:oauth-local:
+    desc: 'Try the OAuth login of Claude Code locally, with no public https address (N5b): starts Keycloak (internal Docker, pinned by digest, dev mode on 127.0.0.1:8080, a realm from test/facilitator/oauth-local/realm.json with a test user, the scope facilitator:participate and the audience mapper) and a node on 127.0.0.1:8765 (http.insecure, Keycloak as the issuer, a test agent), waits for both and prints what to run: claude mcp add, /mcp to log in, the user and password, then facilitator http list, approve and verify. Needs a bundle (FACILITATOR_BUNDLE or dist/). Also: -- down (removes the container and the state), -- status, -- fx <facilitator args> (the node''s own command), -- info.'
+    cmds:
+      - bash test/facilitator/oauth-local/oauth_local.sh {{.CLI_ARGS}}
+
+  test:packet-relay-unit:
+    desc: 'Docker-free tests of the packet-relay Feature (src/packet-relay): two parties, three, a party away, a lossy folder, a slow partial sync between two machines'' copies, forged and misplaced files, a fork, a gap lost for good and its skip, a lost state, a folder without hard links, the guards on egress and ingress and the command (test_relay.py), and install.sh into a throwaway root with DESTDIR, alone with its own copy of sign-packet''s library, the guard options baked and refused when unusable (test_feature.py); part of lint. Needs python3 and ssh-keygen.'
+    cmds:
+      - for t in test/packet-relay/unit/test_*.py; do echo "== $t"; python3 -I "$t" || exit 1; done
+
+  test:audio-unit:
+    desc: 'Docker-free tests of the audio Feature''s audio-check (src/audio/audio-check.sh) and the launcher''s relay: each missing piece gives its own line, in order, and exit 1 (rec, SoX''s PulseAudio backend, pactl; arecord only a note; no PULSE_SERVER; the socket missing, with the hint for DCF_HOST_AUDIO wslg, none and unset; PulseAudio not answering; only monitor sources), "ready" with the capture source and exit 0, and the Feature Taskfile running it; the workstation''s gate (a mounted /mnt/wslg with no socket is "off", not "not set up"; with the socket, "ready" and the time left from the relay''s expires file, none when expired or without wslg); fake sox, pactl and arecord, a real unix socket; then the relay script of the launcher (audio_relay_script) run for real with socat and a fake WSLg socket: off before anything, on with the socket (mode 666) carrying data, the time left, the socket gone after the duration and after off, on twice leaving one relay, a killed relay cleaned up by status, and a missing socat or WSLg socket answered with no socket made; part of lint. Needs python3 (the sockets), socat (the relay; skipped without) and task (the Taskfile part).'
+    cmds:
+      - bash test/audio/unit/audio_check_test.sh
+      - bash test/audio/unit/relay_test.sh
+
+  test:component-registry-unit:
+    desc: 'Docker-free tests of the component-registry Feature (src/component-registry, the dcf-registry command and its git, path, http and db registry sources) on fixture layers: the proposal''s worked example (docs/proposals/component-registry.md section 3.3) to the letter; the layer list (the YAML subset, { } maps, unknown keys refused with file:line, git and path sources checked, the registryFile option and COMPONENT_REGISTRY_FILE); COMPONENT_REGISTRY_WHOAMI required with how to set it, from .env, the task variable or --as; the .layer grammar and match rule (scope and component, * and **, specificity and its tie-breaks, ! exclusion, lock, @replace and a lock surviving it, a type clash, list !item and ref: items, @file, files = @dir overlays, a permission key from the lowest layer only, a kind not in this release, unreadable lines reported); sources (a path fingerprint, a local git repository at a branch, an annotated tag and a commit, a secret read with a stub dcf-secret, offline fallback to the last good copy, a changed pin fetched again, a required layer never fetched, an http source in http_test.sh: a local python3 server, each auth type, the insecure refusal, ETag, Last-Modified and body-hash versions, a 404 and a timeout falling back to the last good copy, an archive refused, redirects, the secret never in output or any process list; a db source in db_test.sh: a real SQLite file through a sqlite3 shim and a stub psql, the connection keys, the password in the client''s environment only, query errors, an empty result, each bad row refused with its reason, text in a file, the version hash, an unsupported driver, a missing client, a gone database falling back to the last good copy); resolve (unchanged layers skipped, removed layers'' copies deleted, the view swapped in, owner-only modes, idempotent, two concurrent runs); explain (layer and version per line, skipped lines and why, dangling refs, --uses); 1.1.0: the built-in base layer (the three utility skills at rank 0, shown by explain, stacked on by a listed layer, its id reserved), layer-list, handover (to an adapter that takes skills, one without the verb never called, none, a failing one), refresh (for the view''s path, --as, a failing resolve hands nothing over), remember (appended to the writable path layer for every skill or one, refreshed, refused with nothing written: no or two writable layers, a git layer, a missing folder, an empty line, a line starting with @); 1.3.0: heading: false (stacked with no heading, a blank line kept after the front matter, explain still naming each line''s layer, a bad value refused) and front matter values (name and description from the strongest value, a front matter made when there is none, a multi-line key replaced whole, a permission key never set from a higher layer); 1.6.0: agent definitions (model and skills merged by type, a ref item checked and found by --uses, every field the agents list owns, args, definition and permission keys skipped and reported, a model that is not one word, COMPONENT_REGISTRY_AGENTS reaching agents only a pattern names and kept in the view, the view''s agents/<name>/ with from.tsv, explain; model.<cli>: a suffix beating a plain model of the same layer and path, losing to a higher layer''s or a more specific path''s plain one, mixed CLIs under [agents/*], an unknown suffix, a lock on model holding it); 1.7.0: layer namespaces (two never mixing, two layers of one namespace merging with a lock, @replace and the permission key from its lowest layer, the Operator''s layers and [skills/*] unaffected, a section that names a namespaced component refused, explicit references (no prefix the own namespace, <ns>:<name> from any layer, none reaching the un-namespaced set from a namespace), a missing dependency reported while resolve goes on, one-hop aliases and bad ones refused, agent definitions applying to no listed agent, the <ns>--<name> folder and SKILL.md name, a folder-name clash reported, explain and handover, bad and reserved names refused with file:line); 1.8.0 (ADR-0074): a view per who-you-are path, handover --as and the who-you-are setting''s view, the hand-over records, explain --as a path''s own view, views pruned, refresh --session for the calling agent alone (an unknown or unsubstituted id refreshing every record, each path resolved once), forget, two paths resolved at once, the skills mode (--skills-mode, the setting, a bad value, off, refresh repeating it) and handovers --skills; the setup script and the Feature Taskfile; 1.11.0 (ADR-0077, template_test.sh): vendor templates rendered by the pinned minijinja-cli (from PATH, which the CI image provides through the component-registry Feature; on a local run else a cache, or downloaded once and checked against the sha256 install.sh pins): the base Claude template equal to the view byte for byte and a hand-over through it equal to the 1.10.0 hand-over in a temp Claude config folder, a layer replacing a template whole, extending one block, adding its own (for: skill and once, an empty output not written), a lock holding, a namespaced template never replacing the Operator''s and writing only in its namespace''s skill folders, a layer at another path not applying, explain naming the winner and the base it extends, a bad head skipped and reported, a template that does not render, a bad output path, an undefined name, two templates for one file and a file outside the templates (the hand-over fails with layer and file named, the CLI keeps its files), minijinja-cli missing (a clear line, files kept; a CLI without templates still handed over), dcf-registry render. 2.1.0: the base Copilot template equal to the view byte for byte, and a hand-over through it and the real agent-adapter-copilot equal to the view''s skills handed straight to it (split and shared, temp COPILOT_HOMEs). Part of lint. Needs git; python3 and curl for the http source (skipped without); minijinja-cli on PATH in CI (never downloaded there), locally curl and network once (skipped offline); task for the Taskfile part.'
+    cmds:
+      - bash test/component-registry/unit/registry_test.sh
+      - bash test/component-registry/unit/http_test.sh
+      - bash test/component-registry/unit/db_test.sh
+      - bash test/component-registry/unit/template_test.sh
+      - bash test/component-registry/unit/sources_test.sh
+
+  test:registry-first-use:
+    desc: 'Resolve a shared skill and a consumer overlay, then render the result for Claude.'
+    cmds:
+      - bash test/component-registry/unit/first_use_test.sh
+
+  test:agents-unit:
+    desc: 'Docker-free tests of the agents command (the participant component, components/participant): the agent list (the YAML subset, required keys, unknown keys warned, errors with file and line), AGENTS_FILE from the task variable, .env, .devcontainer/.env, the environment or the default (a missing file named with its source), each verb per kind (start, --resume, --new and its question, up, list, stop, logs), the no-terminal rule, the fallbacks when the adapter answers exit 3, a listing that fails (state error, nothing started, the hint, never a fresh session), an on-demand agent shown none unless running, reset (a dry run by default, duplicates stopped, --purge, only listed agents and their folders, unlisted sessions untouched, a session mid-turn not stopped, uncommitted changes a warning and with --purge a refusal, --force, refused inside a Claude Code session, --all), the once-per-container-start marker, and the component Taskfile (the deprecation line of agents:version and agents:check when the agents Feature is installed, the component version alone otherwise); a fake adapter keeps sessions in a file and records every call; part of lint. Needs task for the Taskfile part.'
+    cmds:
+      - bash test/agents/unit/agents_test.sh
+
+  test:agent-task:
+    desc: 'Docker-free test of how `task devcontainer:agent`, `devcontainer:agent:list` and `devcontainer:agent:reset` hand the name, the flags and AGENTS_FILE to the agents command, inside the container and through the exec task from the host (--dry), that from the host with no name it refuses before `up` unless the agent list marks one agent default: true (stub devcontainer and docker), and that the deprecated devcontainer:claude and devcontainer:claude:fleet still run and print one deprecation line; fake commands record what they get; part of lint.'
+    cmds:
+      - bash test/bootstrap/agent_task_test.sh
+
+  test:claude-fleet-task:
+    desc: 'Docker-free test of how `task devcontainer:claude:fleet` hands SESSIONS (encoded) and its arguments to claude-fleet, inside the container and through the exec task from the host (--dry), and its refusal without SESSIONS; a fake claude-fleet records what it gets; part of lint.'
+    cmds:
+      - bash test/bootstrap/claude_fleet_task_test.sh
+
+  versions:check:
+    desc: 'Fail, naming file:line, when a container test (test/<id>/*.sh) compares a semver literal with the Feature''s baked version file (/usr/local/share/<id>-feature/version) or `task <id>:version` and it differs from src/<id>/devcontainer-feature.json; container tests run only with Docker, so a version bump otherwise fails only in CI. Part of lint.'
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/check_versions.py'
+
+  changelog:check:
+    desc: 'Fail when a Feature''s `version` in src/<id>/devcontainer-feature.json has no `## [version]` entry in src/<id>/CHANGELOG.md, or when its README''s "Changes" section is stale against the CHANGELOG (run `task docs`); Docker-free; part of lint.'
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/changelog.py' check
+
+  how-it-fits:check:
+    desc: 'Fail when a src/<id>/NOTES.md has no "## How it fits" section (diagram, data and storage tier, reference architectures) or the section has no "Used in:" line (links, or "Used in: none yet"); Docker-free; part of lint.'
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/check_how_it_fits.py'
+
+  architectures:check:
+    desc: 'Fail, naming file:line, when a devcontainer.json fragment in docs/reference-architectures/*.md (a ```jsonc block) names a Feature id that is not in src/, a major that is not the Feature''s current one, or an option that is not in its devcontainer-feature.json; also checks each architecture''s shape (diagram, best practices, anti-patterns with Don''t, Why, Instead, Caught by, a link from the index). Docker-free; part of lint.'
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/check_architectures.py'
+
+  test:architectures:
+    desc: 'Docker-free bash test of the architectures check against a scratch tree: a matching fragment passes; an unknown id, a wrong or missing major, an unknown option, a wrong option type, a local Feature named by its published id, a fragment that does not parse, an anti-pattern with no Caught by and a planned fragment that already passes each fail (test/lint/architectures_test.sh); part of lint.'
+    cmds:
+      - bash test/lint/architectures_test.sh
+
+  changelog:draft:
+    desc: 'Print a draft CHANGELOG entry for src/<FEATURE>: the commits that touched it since origin/main (BASE=<ref> to change), grouped Added/Changed/Fixed, under the version now in its devcontainer-feature.json. Copy it into src/<FEATURE>/CHANGELOG.md and rewrite it for a user of the Feature: what changed for them and whether they must act (an option renamed, a task removed, a rebuild needed). Usage: task changelog:draft FEATURE=<id>'
+    requires:
+      vars: [FEATURE]
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/changelog.py' draft '{{.FEATURE}}' {{if .BASE}}--base '{{.BASE}}'{{end}}
+
+  lint:toolchain:
+    desc: 'Fail when .devcontainer/ci/devcontainer.json (what the Lint workflow builds) differs from .devcontainer/devcontainer.json in the base image or any Feature it shares (same reference, same options), or when shellcheck, yamllint or powershell has no pinned version; part of lint. Bump a tool version in both files.'
+    cmds:
+      - python3 -I '{{.TASKFILE_DIR}}/.github/scripts/check_toolchain.py'
+
+  test:git-unit:
+    desc: 'Docker-free tests of the git Feature''s wrapper, git-setup and .git-dirs mapping, run from src/git against temp folders (never the checkout''s own git dir or global config); part of lint.'
+    cmds:
+      - bash test/git/unit/git_dirs_test.sh
+      - bash test/git/unit/safe_directory_test.sh
+
+  test:shutdown:
+    desc: 'Docker-free bash tests of the shutdown-check contract (bootstrap/SHUTDOWN.md): the default resolution snippet from bootstrap/devcontainer.yml against fake task and devhost-shutdown-check commands, the starter bootstrap/shutdown-check.sh in temp git repos, and the bash twin''s stop (127 message, refusal, FORCE, prepshutdown) with a stub engine and CLI; part of lint.'
+    cmds:
+      - bash test/bootstrap/shutdown_resolution_test.sh
+
+  test:psscriptanalyzer-files:
+    desc: 'Docker-free bash test that the PSScriptAnalyzer step checks tracked and non-ignored files only: a bad script in a git-ignored folder is not scanned, a bad tracked one still fails (test/lint/psscriptanalyzer_files_test.sh); part of lint.'
+    cmds:
+      - bash test/lint/psscriptanalyzer_files_test.sh
+
+  test:engine-wait:
+    desc: 'Docker-free bash tests of the engine wait in the bash twin (src/devcontainer-cli/devcontainer-cli.sh): one check before up, build, exec, set-up and run-user-commands when the engine answers (docker info, ps -q for another engine), none for the subcommands that need no engine; a late engine waited for with one waiting line; one that never answers failing after DEVCONTAINER_ENGINE_WAIT seconds without running the CLI, naming the engine, its own error and how to start it; DEVCONTAINER_ENGINE_WAIT=0 and a bad value; a failed up printing what the engine says; a stub engine and CLI; part of lint. The PowerShell twin is in test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/engine_wait_test.sh
+
+  test:build-lock:
+    desc: 'Docker-free bash tests of the build lock in the bash twin (src/devcontainer-cli/devcontainer-cli.sh): the holder''s file beside the lock (repository folder, subcommand and flags, start) written and removed, a waiter''s line naming the holder and how many others wait and printed again when the holder changes, a stale holder file ignored, a stopped waiter leaving no file; the lock skipped with one line when `buildx version` reports 0.8.0 or later, kept for an older or missing buildx, for wslc and with DEVCONTAINER_BUILD_LOCK=1, dropped with =0; a stub engine and CLI; part of lint. The PowerShell twin is in test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/build_lock_test.sh
+
+  test:host-type:
+    desc: 'Docker-free bash tests of HOST_TYPE resolution in the bash twin (src/devcontainer-cli/devcontainer-cli.sh): explicit id, unknown id, auto and HOST_TYPE_PRIORITY (default and an organisation list), the DCF_HOST_* variables handed to the CLI, DEVCONTAINER_DOCKER_PATH still naming the engine; evidence faked with DCF_HOST_UNAME, DCF_HOST_PROC_VERSION and fake docker and devcontainer commands; part of lint. The PowerShell twin is covered by test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/host_type_test.sh
+
+  test:dind-clean:
+    desc: 'Docker-free bash tests of .devcontainer/dind-clean.sh (prunes the docker-in-docker daemon, skips with one line when no daemon answers) and dind-guard.sh (refuses under 20 GB free, FORCE=1 overrides), with docker and df stubbed; part of lint.'
+    cmds:
+      - bash test/devcontainer/dind_clean_test.sh
+
+  test:host-mounts:
+    desc: 'Docker-free bash tests of the host mounts the bash twin (src/devcontainer-cli/devcontainer-cli.sh) adds to `up`: the --mount argument per host type (linux, macos, windows-wsl-docker), the source folder created, a mount skipped when the repository''s devcontainer.json already declares its target (JSONC comments, trailing commas, object form, --config), HOST_MOUNTS=false, none for build/exec/read-configuration, the SSH agent socket mount per host type and SSH_AGENT_MODE=key, the cloud folder (DCF_HOST_CLOUD_FOLDER at the fixed /mnt/cloud-folder-host, a Windows path passed as is, a missing folder skipped and never created), FUSE on request (the grant''s three variables, refused with a warning on a wslc engine), and what `host` lists; a stub devcontainer records its arguments; part of lint. The PowerShell twin is in test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/host_mounts_test.sh
+
+  test:cloud-folder-login:
+    desc: 'Docker-free bash test of the bash twin''s cloud-folder login (task cloud-folder:login on a Linux or macOS workstation; src/devcontainer-cli/devcontainer-cli.sh run cloud-folder-login): stub devcontainer and docker run the "container" here, so the real cloud-folder-setup signs in against a fake rclone authorize; the relay (the browser at the rewritten link, each request through docker exec and /dev/tcp, the token in the volume), the listener closed after success, failure and timeout, the busy port taking the paste route, --paste, no container, --workstation-rclone (the version from devcontainer.json or the Feature default, the zip verified against SHA256SUMS from a local server, cached, a wrong digest refused, the token to login --token on stdin), the default pin equal to the Feature''s, and the root Taskfile''s cloud-folder include (the launcher on the workstation, the Feature in the container, no clash); part of lint. The PowerShell twin is in test:bootstrap (CloudFolderLogin.Tests.ps1). Needs python3.'
+    cmds:
+      - bash test/bootstrap/cloud_folder_login_test.sh
+
+  test:cloud-folder-unit:
+    desc: 'Docker-free tests of the cloud-folder Feature''s cloud-folder-setup. Host mode over a faked mount point (a mount table file, no mount, no privilege): the build-time link from mountPoint to the host mount (made, idempotent, none when they are equal, an empty folder replaced, a folder with content or a file refused), status through the link, no source, mounted and not empty, mounted and empty, not writable (skipped as root), a bare folder that is not mounted, mode host with nothing mounted, the mode this version does not know (mount), a path with a space, a mounted file, --json, the post-start report never failing, nothing written into the folder. The installer''s version line under pipefail (a fake rclone writing 100000 lines, no SIGPIPE); its download retries are dcf_curl''s (test:common-unit). Sync mode with a fake rclone that plays bisync between two temp folders: login (the browser sign-in with a fake rclone authorize on a local port: the address the browser shows after the sign-in pasted with or without the scheme and requested on rclone''s listener, a token at the same prompt, garbage and a stale address refused, the token exchange failing, --relay waiting and timing out, --token; a pasted token read from stdin, the drive lookup through rclone''s non-interactive config, several drives, client credentials from a secret file), the first sync a --resync with --max-lock, --max-delete 50, --resilient and --recover, later syncs, a new folder resynced, failures and the delete guard, one sync at a time, the shutdown check (a running sync, pending changes, waiting), the timer (started once, syncing, syncInterval 0, stopped cleanly, a running sync stopped gracefully), and no token in any process''s arguments, log, record or output. Mount mode with a fake rclone that plays `rclone mount` in the mount table file and answers `rc vfs/stats` with replies recorded from rclone 1.75.2: the FUSE check per cause (no device, not a character device, no CAP_SYS_ADMIN in the bounding set, AppArmor docker-default, no fusermount3), auto choosing mount, sync or none (and keeping a sync copy on sync), no FUSE in mode mount (the DCF_HOST_FUSE hint), the mount''s flags (VFS cache writes in the volume, the remote control on localhost, never --rc-no-auth or --daemon), start idempotent, a folder with files refused, rclone exiting, status and --json from vfs/stats (pending, cache off, failed uploads, no answer), the shutdown check and unmount refusing pending uploads, --force. The registry source (registry_source_test.sh, a temp folder as the cloud folder and a fake cloud-folder-setup): fetch without the sync marker, the version fingerprint, a folder or a mount point that is not there or a status that says not set up as one line and exit 1, .. refused, a layer resolved through dcf-registry and its last good copy used when the folder goes. All: the Feature Taskfile handing CLOUD_FOLDER_*, CLI_ARGS and WAIT to the script; part of lint. Needs python3 (to read the JSON) and task.'
+    cmds:
+      - bash test/cloud-folder/unit/status_test.sh
+      - bash test/cloud-folder/unit/sync_test.sh
+      - bash test/cloud-folder/unit/version_test.sh
+      - bash test/cloud-folder/unit/mount_test.sh
+      - bash test/cloud-folder/unit/login_test.sh
+      - bash test/cloud-folder/unit/poststart_test.sh
+      - bash test/cloud-folder/unit/registry_source_test.sh
+
+  test:ssh-agent-unit:
+    desc: 'Docker-free tests of the ssh-agent Feature''s ssh-agent-setup against temp folders with the real OpenSSH tools and git: the verdict per DCF_HOST_SSH_AGENT (socket, none, key, unknown), key mode (an agent started on the fixed path and reused, a stale socket replaced, a 0600 key loaded and a 0644 one refused, key-new, key-add, key-stdin, key-remove), key hygiene (dedicated default name, default-name and age warnings, key-age), rotation and retirement against a stubbed gh (the steps in order, the old key retired only after git:verify passes, the allowed_signers history, REVOKE, the resume path, --plan changing nothing), the refusal when key mode is off, git-signing (KEY by fingerprint or .pub, SCOPE and its default) and a real sign and verify round trip in git-verify; and the passphrase prompt (passphrase_test.sh, on a real pseudo-terminal): the start hook never asks (skips a protected key with one warning, exit 0, the other key loaded, the agent running), `setup --ask` waits and then warns with exit 0 at the timeout, with no terminal or with the wait switched off, a typed passphrase loads the key, a wrong one is asked again, the setting is honoured; and keys from OpenBao (bao_load_test.sh, with the real dcf-secret and openbao-ssh against a stub bao keeping a KV store in a temp folder): key:load piping the key into ssh-add -t <life> - and never into a file (TMPDIR empty, no file outside the store holding a private key), the lifetime capped by the login''s time left and 480 minutes and shortened by MINUTES, the agent named (the container''s, the workstation''s), dcf-secret''s exit codes passed on with nothing loaded, key:lock also while sealed, the deprecation line of every key-volume task with the old behaviour kept, key:rotate on OpenBao records against a stub gh:ssh-key:add (the four steps, a stop at step 2 leaving the old key whole, --plan), and the allowed_signers resolution test of the proposal''s section 8 (git reads the work-tree-relative gpg.ssh.allowedSignersFile from the top of the work tree, from a subfolder and with -C; old and new keys'' commits verify; valid-before honoured; the repository''s own .devcontainer/allowed_signers well formed); only throwaway keys; part of lint. Needs openssh-client and git.'
+    cmds:
+      - bash test/ssh-agent/unit/setup_test.sh
+      - bash test/ssh-agent/unit/passphrase_test.sh
+      - bash test/ssh-agent/unit/bao_load_test.sh
+
+  test:openbao-unit:
+    desc: 'Docker-free tests of the openbao Feature''s scripts. dcf-secret against a stub bao that answers from environment variables and logs every call (dcf_secret_test.sh): get (the value alone on stdout, the mount, the field and the name checks, a multi-line value untouched), each exit code with its one-line fix (10 unreachable, 11 sealed or not initialised, 12 no token, 13 denied, 14 no such secret, and 1 and 2 for a put bao cannot explain and a wrong call) worked out from bao status, the JSON field initialized and the capabilities bao token capabilities reports, put (the value on stdin and in no argument, kept byte for byte; a merge by default with kv patch, a create with -cas=0 when the secret is absent, one retry as a patch when it appeared in between, --replace with kv put, a token without the patch capability refused with 13 and nothing written; nothing on stdout, a terminal refused), status in every state, DCF_SECRET_AS refused, no bao on PATH, and no fallback to a file in the state folder or a variable when the server is sealed, unreachable or the secret is missing. openbao-setup over temp folders (setup_test.sh) with the real dcf-persist: the state folder made and reported, a token left in ~/.vault-token moved into it once (only with the token helper in effect, never over one already there, mode 600), the token helper reported in effect, unset or another file, an unwritable folder reported, the mode (client, server, an unknown one reported, run as client), BAO_ADDR and server mode''s default for it, BAO_TOKEN and a saved login reported without their text, bao missing, never fatal; and the server-mode start hook (`openbao-setup start`) against a stub bao that plays `bao server` and `bao status`: the config written (raft on the state folder, one loopback listener without TLS and with the unauthenticated root-token endpoints on, the file audit device, no disable_mlock), the server started once and reused, a dead pid not reused, not initialised, sealed and unsealed said, a server that does not answer reported with its log, a config without the marker line left alone, client mode and a missing bao doing nothing, never fatal. The token helper bao calls (token_helper_test.sh): get, store and erase through `sh -c`, the token at OPENBAO_STATE_DIR/token with mode 600, written atomically, a missing token read as nothing, erase of a missing one no error, a failing store non-zero. `task openbao:logout` (logout_test.sh): revoke then erase, the erase when the revoke fails, nothing stored. Server mode''s tasks (server_test.sh, openbao-server against a stub bao with a small state): the refusal inside an agent''s job for every task that handles a share or a token (init, unseal, seal, password), by DEVHOST_JOB_CHILD, CLAUDECODE and a variable named in OPENBAO_AGENT_JOB_VARS, with and without a terminal and through the Taskfile, never a call to bao, never a prompt; the refusal without a terminal and in client mode; init under a pseudo-terminal (the backup choice asked for, recorded and asked again when empty or invalid, the Operator''s password asked twice and kept off every argument, 3 shares and threshold 2 printed to the terminal only and written nowhere, the unseal, the configuration in order with the login lifetime of 4 hours and at most 8, the root token used only for it and revoked, also after a failed step, only -pgp-keys accepted, never twice); unseal, seal and status in every state with the standing no-backup warning; the AppRole tasks (the role''s one-secret policy, the loopback binding, 5 minute tokens, one valid secret id written mode 600 and never printed, ALL=1, revoke) and their exit codes; password (the new password asked twice, written on bao''s stdin only through a root token from two shares that is revoked also on failure, with no login saved at all); the root token from the unauthenticated sys/generate-root endpoints through a stub curl (gr_curl_stub.sh: the shares on stdin with the nonce, never an argument, no token sent, an attempt in progress not taken over, what is not a share never sent), and the CLI''s authenticated flow with the login when the listener has them off. Backup and restore (backup_test.sh, openbao-server against a stub bao): backup''s file name, content, sha256 and last-backup record, never an overwrite, backupKeep/KEEP removing only this machine''s own name pattern (and 0, the option and its twin), the destination from DEST, the option or the choice recorded at init, the exit codes 0, 10, 11, 12, 13, 20, 2 and 1, the role logging in by files, the temporary folder empty after success and every failure, a write task exiting 0 when its backup fails, the timer (its checks, a tick, a sealed server skipped), the status line, and restore (the refusals, a fresh server with the throwaway init, a failed or half-done one, a store in use, run twice, another machine''s file, the root token revoked) and backup:role. Onboarding (onboard_test.sh, openbao-onboard against a stub bao that keeps the wrapping tokens and a stub dcf-secret): the refusal inside an agent''s job for export, claim, wrap and unwrap (DEVHOST_JOB_CHILD, CLAUDECODE, OPENBAO_AGENT_JOB_VARS, through the Taskfile too, bao never called) and without a terminal; wrap''s TTL default of 15 minutes, the 1 hour cap and what is not a duration, one token per secret, the file mode 600 and no token on stdout, names under onboarding/ refused, an existing OUT never overwritten; unwrap''s lookup of every token before any unwrap with the wrapping token as the call''s token, the creation-path refusal (another secret, a token made by sys/wrapping/wrap), an expired or already used token refused with nothing unwrapped, the value put field by field and in no argument. The SSH key records (ssh_test.sh, openbao-ssh with the real dcf-secret and ssh-keygen against a stub bao keeping a KV v2 store in a temp folder, kv_bao_stub.sh): new (three fields, dated metadata, create-only, the tmpfs folder empty, a name never reused), put and import FROM=file from stdin only, import FROM=ssh-agent against a key volume in a temp folder (the .meta dates, fingerprints compared, run twice, a clash refused, allowed_signers.history and the keys'' lines in .devcontainer/allowed_signers, the volume untouched without a terminal), FROM=agentic-register, retire (versions destroyed, the public key kept), age and list; dcf-secret ttl. The OpenBao key file''s container side (keyfile_test.sh, openbao-keyfile through openbao-setup against a stub curl that plays the HTTP API with a small state, kf_curl_stub.sh): unlock --status in every mode and state, never refused; the refusal inside an agent''s job for unlock --stdin, keyfile create and rotate (exit 3, no request) and exit 4 outside keyfile mode; the stdin protocol (what is not a key file refused before any request; a good one unseals with sys/unseal, logs in, revokes the previous token with itself, saves the new one mode 600 and starts the renewer detached); a key file of another server, refused shares and a refused login saving nothing; no share, secret id or token in any request''s arguments or in the state folder after a good or failed unlock; BAO_ADDR, VAULT_ADDR and BAO_TOKEN ignored; the renewer renewing every third of the period and exiting on a refused renewal, a dead token and a logout; keyfile create and rotate in two steps (step 1: the root token from the shares and revoked, the operator AppRole, the policy''s deny, rotate-keys to 5 shares threshold 2 with verification so the old shares and secret id still hold, a narrow confirmation token carried in the nonce and in no file; step 1 again after a lost answer cancelling the waiting rekey, its secret id and token; keyfile confirm: the verification, the other operator secret ids destroyed, the userpass user deleted, earlier logins revoked, the other roles reissued, the login with a one-use secret id, idempotent when run again; keyfile cancel keeping the shares in force, with a nonce cancelling only its own step and refusing another; a dropped rotation not confirmed; the start hook recording a dropped rekey), init in two steps, a failed rotation leaving nothing behind; keyfile status with pending (the verification nonce, else empty); ready only with the renewer running; openbao:password and init refused and server:status''s lines with unlock keyfile. The SSH certificate authority (ssh_ca_test.sh, dcf-ssh-sign with the real dcf-secret and openbao-server ssh-ca-init, ssh-ca-role and ssh-ca-import against a stub bao keeping the mounts, the CA, the roles and the KV records): dcf-ssh-sign refused inside an agent''s job for every subcommand (exit 3, bao never called); sign (the public key on stdin and in no argument, the certificate alone on stdout, the role path, principals, key id and ttl in seconds, the default role and --role), each exit code with its one line (10, 11 for sealed, not initialised and no CA, 12, 13 for a token that may not sign and for a principal outside the role, a principal only another role allows refused both ways, 2 for a wrong call, an unknown role, a private or RSA key on stdin and a ttl above the role''s maximum, 1 for a failure no signal explains), ca, ca --fingerprint, roles and status in every state, no fallback to a file or the environment; the tasks: the agent-job guard, what is refused before bao is asked, init (the ssh mount, the generated CA, the role''s JSON: ed25519 only, user certificates only, no extensions, no critical options, lifetimes, patterns in the KV record), a second run changing nothing, ALLOWED, TTL, MAX_TTL and MOUNT, a second role with the same refusals, import (key on stdin only, never in an argument or a file, an existing CA never replaced, a public, RSA, junk or passphrase-protected key refused), server mode refusing without a terminal with nothing changed, and the Operator''s policy as the only one that carries the sign path. That the real bao gives the signals the stubs play is the container tests test/openbao/dev_server.sh, ssh_ca.sh, server_mode.sh, backup_restore.sh, onboarding.sh and server_keyfile.sh (CI). Part of lint. Needs bash, grep and task (script(1) for the terminal checks, skipped without it).'
+    cmds:
+      - bash test/openbao/unit/dcf_secret_test.sh
+      - bash test/openbao/unit/setup_test.sh
+      - bash test/openbao/unit/token_helper_test.sh
+      - bash test/openbao/unit/logout_test.sh
+      - bash test/openbao/unit/ssh_test.sh
+      - bash test/openbao/unit/ssh_ca_test.sh
+      - bash test/openbao/unit/server_test.sh
+      - bash test/openbao/unit/backup_test.sh
+      - bash test/openbao/unit/onboard_test.sh
+      - bash test/openbao/unit/keyfile_test.sh
+
+  test:gh-unit:
+    desc: 'Docker-free tests of the gh Feature''s gh-ssh-key-add (task gh:ssh-key:add) against a stub gh and a stub dcf-secret: the key registered with --type signing and its title from FILE, stdin or OpenBao (KEY=ssh/<name>), dcf-secret''s exit code passed on, a key already a signing key left alone, a private key refused, gh missing or logged out refused plainly, a failing add naming the admin:ssh_signing_key scope, the temporary public key file removed; never against GitHub; part of lint. Needs openssh-client.'
+    cmds:
+      - bash test/gh/unit/ssh_key_add_test.sh
+
+  test:ssh-key-import:
+    desc: 'Docker-free bash tests of the host tasks devcontainer:openbao-ssh-import (the key file streamed on stdin into openbao-ssh import --from file, never in an argument; NAME; the refusals; the container''s exit code passed on) and the deprecated devcontainer:ssh-key-import (its deprecation line) in the bash twin (src/devcontainer-cli/devcontainer-cli.sh): the key file reaches `devcontainer exec` on stdin and never in an argument, the .pub follows, the key load runs last, the refusals (no file, no running container, key mode off in the container), and the host-side warnings (default name, a public key also in authorized_keys or another ~/.ssh/*.pub, never printing the key); stub devcontainer and docker record what they get; part of lint. The PowerShell twin is in test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/ssh_key_import_test.sh
+
+  test:bootstrap-dir:
+    desc: 'Docker-free, offline bash tests of where bootstrap/bootstrap.sh vendors: the default .devcontainer/cli_bootstrap.ignore, BOOTSTRAP_DIR and its rejections (absolute, ..), the .gitignore created, appended once, other lines kept, BOOTSTRAP_GITIGNORE=false, the Taskfile template''s optional include of the chosen path, and the old ./bootstrap form (kept, migration note, include repointed, optional: true added when absent); against a temp repo with this checkout as --source and a fake task; part of lint. The PowerShell twin is in test:bootstrap.'
+    cmds:
+      - bash test/bootstrap/bootstrap_dir_test.sh
+
+  test:bootstrap:
+    desc: 'Pester tests of the Windows host launcher (bootstrap/host/DevcontainerCli.psm1) and of bootstrap/bootstrap.ps1 (vendoring folder, BOOTSTRAP_DIR, git-ignore, Taskfile template, old form): the build lock that serialises devcontainer up/build across repositories (its holder and waiter files, skipped with BuildKit build contexts), the engine wait before the subcommands that need the engine (DEVCONTAINER_ENGINE_WAIT) and the engine''s own error after a failed up, the stop check, HOST_TYPE resolution and the DCF_HOST_* variables (evidence mocked), the cloud-folder login (relay, busy port, timeout, --workstation-rclone; stub devcontainer and docker, so those run where bash runs), and the OpenBao key file (the unlock step after up, silent unless keyfile mode; the key file on stdin only, never in the engine''s arguments or environment, nothing in the temp folder; the agent guard; create, rotate, export, import, forget; DPAPI mocked off Windows, its round trip only on Windows; the bash launcher''s refusal). Needs pwsh with Pester 5 or later (Install-Module Pester -Scope CurrentUser); runs on any host, so it is part of lint.'
+    cmds:
+      - pwsh -NoLogo -NoProfile -Command "Import-Module Pester -MinimumVersion 5.0; Invoke-Pester -Path '{{.TASKFILE_DIR}}/test/bootstrap' -Output Detailed -CI"
+
+  features:stage:
+    desc: 'Copy every src/<id> Feature into .devcontainer/features/<id> (gitignored), so this repo''s own devcontainer references the unpublished Features by local path. The devcontainer runs it as initializeCommand before every start.'
+    silent: true
+    cmds:
+      - cmd: pwsh -NoLogo -NoProfile -File .devcontainer/stage-features.ps1
+        platforms: [windows]
+      - cmd: bash .devcontainer/stage-features.sh
+        platforms: [linux, darwin]
+
+  common:check:
+    desc: 'Fail if a Feature''s copy of a src/common helper (dcf-persist.sh, dcf-curl.sh) differs from the canonical file, or a script''s embedded copy (dcf-skills.sh between its # >>> and # <<< markers in agent-adapter-claude and agent-adapter-copilot) differs from it or has its markers other than once. Run `task common:sync` to refresh the copies.'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0
+          for canon in src/common/*.sh; do
+            name="$(basename "$canon")"
+            [ "$name" = install.sh ] && continue
+            for copy in src/*/"$name"; do
+              [ "$copy" = "$canon" ] && continue
+              [ -e "$copy" ] || continue
+              if ! cmp -s "$canon" "$copy"; then echo "stale copy: $copy differs from $canon (task common:sync)"; rc=1; fi
+            done
+          done
+          # a helper carried inside a script, between "# >>> <name>" and "# <<< <name> <<<" lines
+          # (dcf-skills.sh in the CLI adapters, which stay one file each)
+          for canon in src/common/*.sh; do
+            name="$(basename "$canon")"
+            for f in $(grep -l -F "# >>> $name" src/*/*.sh 2>/dev/null); do
+              [ "$f" = "$canon" ] && continue
+              n="$(grep -c -F "# >>> $name" "$f")"
+              if [ "$n" -ne 1 ] || [ "$(grep -c -F "# <<< $name <<<" "$f")" -ne 1 ]; then echo "$f: the $name markers must appear once each"; rc=1; continue; fi
+              if ! awk -v b="# >>> $name" -v e="# <<< $name <<<" 'index($0, e) == 1 { p = 0 } p { print } index($0, b) == 1 { p = 1 }' "$f" | cmp -s "$canon" -; then
+                echo "stale embedded copy: $f differs from $canon between its markers (task common:sync)"; rc=1
+              fi
+            done
+          done
+          [ "$rc" -eq 0 ] && echo "common helper copies are up to date"
+          exit "$rc"
+
+  components:check:
+    desc: 'Fail if a Feature''s vendored copy of a shared component (src/<id>/<name>/ for each components/<name>/, e.g. src/claude-code/participant/) differs from the component anywhere in the folder: every file at every depth, a file missing from the copy and a file only in the copy (diff -r; __pycache__ ignored). Run `task components:sync` to refresh the copies. Part of lint.'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0
+          for canon in components/*/; do
+            canon="${canon%/}"
+            [ -d "$canon" ] || continue
+            name="$(basename "$canon")"
+            [ -f "$canon/COMPONENT_VERSION" ] || { echo "$canon has no COMPONENT_VERSION"; rc=1; }
+            for copy in src/*/"$name"; do
+              [ -d "$copy" ] || continue
+              if ! out="$(diff -r -x __pycache__ "$canon" "$copy" 2>&1)"; then
+                echo "stale copy: $copy differs from $canon (task components:sync):"
+                printf '%s\n' "$out" | grep -E '^(diff|Only in|Binary)' | sed 's/^/  /'
+                rc=1
+              fi
+            done
+          done
+          [ "$rc" -eq 0 ] && echo "component copies are up to date"
+          exit "$rc"
+
+  common:curl-check:
+    desc: 'Fail on a download in a Feature script (src/<id>/*.sh) that does not go through dcf_curl, the retry helper in src/common/dcf-curl.sh (a curl or wget call: the name followed by an option, a quote, a variable or a URL; comment lines skipped), and on a script that calls dcf_curl without its vendored copy beside it or without sourcing it. A justified exception carries `dcf-curl: allow <reason>` on the same line.'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0
+          for f in src/*/*.sh; do
+            [ "$(basename "$f")" = dcf-curl.sh ] && continue
+            dir="$(dirname "$f")"
+            hits="$(grep -nE '(^|[^[:alnum:]_./-])(curl|wget)[[:space:]]+(-|"|\$|https?:)' "$f" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -v 'dcf-curl: allow' || true)"
+            if [ -n "$hits" ]; then
+              printf '%s\n' "$hits" | while IFS= read -r h; do echo "$f:$h"; echo "  ^ a download without dcf_curl: source dcf-curl.sh and call dcf_curl, or mark the line 'dcf-curl: allow <reason>'"; done
+              rc=1
+            fi
+            if grep -qE '(^|[^[:alnum:]_])dcf_curl[[:space:]]' "$f"; then
+              if [ ! -f "$dir/dcf-curl.sh" ]; then echo "$f calls dcf_curl but $dir/dcf-curl.sh is missing (cp src/common/dcf-curl.sh $dir/)"; rc=1; fi
+              if ! grep -qE '^[[:space:]]*(\.|source)[[:space:]].*dcf-curl\.sh' "$f"; then echo "$f calls dcf_curl but never sources dcf-curl.sh"; rc=1; fi
+            fi
+          done
+          [ "$rc" -eq 0 ] && echo "every download in a Feature script goes through dcf_curl"
+          exit "$rc"
+
+  test:common-unit:
+    desc: 'Docker-free test of the download helper src/common/dcf-curl.sh: the retry flags (--retry-all-errors when curl has it, read without SIGPIPE; dropped on an older curl), the arguments passed through, curl --help read once; then the real curl against a local server that cuts the first connection mid-transfer (curl exit 56) and mid-TLS-handshake (exit 35, needs openssl): plain curl --retry gives up, dcf_curl gets the file; and the shared skills hand-over src/common/dcf-skills.sh (skills-shared-helper) sourced alone with a made-up vendor''s settings: two views split into the shared personal folder and each agent''s own folder (SK_OWN), copies marked and an unmarked one untouched, the vendor''s clash and reload hooks called, skills_show, sk_add_dir once and never twice, the start line, shared, off, forget and a bad mode; each adapter carrying it verbatim between its markers. Part of lint. Needs python3.'
+    cmds:
+      - bash test/common/unit/dcf_curl_test.sh
+      - bash test/common/unit/dcf_skills_test.sh
+
+  test:go-task-unit:
+    desc: 'Docker-free test of the go-task Feature''s team task aliases: the task-aliases generator over the real task and yq in a temp workspace (the format and every rejected case, golden output with quoting, shadowing a real task, a task alias and an include alias refused, a missing target broken, an alias to an alias refused, never fatal with bad YAML, no team file, no Taskfile, no yq or task, regeneration idempotent and after a change, the flattened include reaching task --list, task <alias> passing its fixed vars, Task 3.54''s duplicate-name failure that is why shadows are refused) and task-features-registry (features.yml byte-identical with taskAliases off, the flattened include with it on); part of lint. Needs task; yq from PATH or the pinned release downloaded through dcf_curl.'
+    cmds:
+      - bash test/go-task/unit/aliases_test.sh
+
+  taskfiles:check:
+    desc: 'Fail if a Feature Taskfile (src/<id>/taskfile.yml, components/<name>/taskfile.yml) breaks the mechanical rules: every task runs in the directory task was started from (dir: ''{{"{{"}}.USER_WORKING_DIR{{"}}"}}''; included through features.yml it would otherwise run in /usr/local/share/go-task/includes.d), every task has a desc, and the first task is version (NFR-2).'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0
+          for f in src/*/taskfile.yml components/*/taskfile.yml; do
+            found="$(awk -v q="'" '
+              function flush() {
+                if (task != "" && !dir) print "dir " task
+                if (task != "" && !desc) print "desc " task
+                task = ""; dir = 0; desc = 0
+              }
+              /^tasks:$/ { in_tasks = 1; next }
+              in_tasks && /^  [A-Za-z0-9:_-]+:$/ {
+                flush(); task = $1; sub(/:$/, "", task)
+                if (!first) { first = task; if (task != "version") print "first " task }
+                next
+              }
+              in_tasks && $0 == "    dir: " q "{{"{{"}}.USER_WORKING_DIR{{"}}"}}" q { dir = 1 }
+              in_tasks && /^    desc: / { desc = 1 }
+              END { flush() }' "$f")"
+            while read -r kind t; do
+              case "$kind" in
+                dir) echo "$f: task $t has no dir: '{{"{{"}}.USER_WORKING_DIR{{"}}"}}'" ;;
+                desc) echo "$f: task $t has no desc (NFR-2)" ;;
+                first) echo "$f: the first task is $t, not version (NFR-2)" ;;
+                *) continue ;;
+              esac
+              rc=1
+            done <<EOF
+          $found
+          EOF
+          done
+          [ "$rc" -eq 0 ] && echo "every Feature task runs in the caller's directory, has a desc, and version comes first"
+          exit "$rc"
+
+  common:sync:
+    desc: 'Copy every src/common/*.sh helper over the copies the other Features carry (a Feature folder must be self-contained when published, so the helper is vendored rather than depended on), and rewrite an embedded copy between its # >>> and # <<< markers (dcf-skills.sh in the CLI adapters), keeping the script''s own mode.'
+    silent: true
+    cmds:
+      - cmd: |
+          for canon in src/common/*.sh; do
+            name="$(basename "$canon")"
+            [ "$name" = install.sh ] && continue
+            for copy in src/*/"$name"; do
+              [ "$copy" = "$canon" ] && continue
+              [ -e "$copy" ] || continue
+              cp "$canon" "$copy" && echo "synced $copy"
+            done
+            # an embedded copy: the lines between "# >>> <name>" and "# <<< <name> <<<" replaced
+            for f in $(grep -l -F "# >>> $name" src/*/*.sh 2>/dev/null); do
+              [ "$f" = "$canon" ] && continue
+              awk -v b="# >>> $name" -v e="# <<< $name <<<" -v c="$canon" '
+                index($0, e) == 1 { skip = 0 }
+                !skip { print }
+                index($0, b) == 1 { while ((getline l < c) > 0) print l; close(c); skip = 1 }' "$f" > "$f.sync.$$" &&
+                cat "$f.sync.$$" > "$f" && rm -f "$f.sync.$$" && echo "synced $f (embedded)"
+            done
+          done
+
+  components:sync:
+    desc: 'Copy each shared component (components/<name>/) over every Feature''s vendored copy of it (src/<id>/<name>/), whole folder, so files removed from the component go from the copies too. A Feature starts carrying a component by creating the empty folder (mkdir src/<id>/participant) and running this. After a change to a component, bump its COMPONENT_VERSION and every Feature that carries a copy.'
+    silent: true
+    cmds:
+      - cmd: |
+          for canon in components/*/; do
+            canon="${canon%/}"
+            [ -d "$canon" ] || continue
+            name="$(basename "$canon")"
+            for copy in src/*/"$name"; do
+              [ -d "$copy" ] || continue
+              rm -rf "$copy" && cp -r "$canon" "$copy" && rm -rf "$copy/__pycache__" && echo "synced $copy"
+            done
+          done
+
+  signpacket:check:
+    desc: 'Fail if a Feature''s vendored copy of sign-packet''s library (src/<id>/signpacket/, carried by register-engine and packet-relay so each installs alone, in any order) differs from src/sign-packet/signpacket/, or, in a tree without sign-packet, from the other copies. Run `task signpacket:sync` to refresh them. Part of lint.'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0; canon=""
+          [ -d src/sign-packet/signpacket ] && canon=src/sign-packet/signpacket
+          for copy in src/*/signpacket; do
+            [ -d "$copy" ] || continue
+            [ -n "$canon" ] || canon="$copy"
+            [ "$copy" = "$canon" ] && continue
+            if ! diff -rq -x __pycache__ "$canon" "$copy" >/dev/null; then echo "stale copy: $copy differs from $canon (task signpacket:sync)"; rc=1; fi
+          done
+          [ "$rc" -eq 0 ] && echo "sign-packet library copies are up to date"
+          exit "$rc"
+
+  signpacket:sync:
+    desc: 'Copy src/sign-packet/signpacket/ over every Feature''s vendored copy of it (src/<id>/signpacket/), after a change to sign-packet''s library; bump each Feature that carries a copy.'
+    silent: true
+    cmds:
+      - cmd: |
+          [ -d src/sign-packet/signpacket ] || { echo "no src/sign-packet/signpacket in this tree"; exit 1; }
+          for copy in src/*/signpacket; do
+            [ "$copy" = src/sign-packet/signpacket ] && continue
+            [ -d "$copy" ] || continue
+            rm -rf "$copy" && cp -r src/sign-packet/signpacket "$copy" && rm -rf "$copy/__pycache__" && echo "synced $copy"
+          done
+
+  registerengine:check:
+    desc: 'Fail if a Feature''s vendored copy of register-engine''s library (src/<id>/registerengine/, carried by facilitator so it installs alone) differs from src/register-engine/registerengine/. Run `task registerengine:sync` to refresh them. Part of lint.'
+    silent: true
+    cmds:
+      - cmd: |
+          rc=0; canon=src/register-engine/registerengine
+          [ -d "$canon" ] || { echo "no $canon in this tree"; exit 0; }
+          for copy in src/*/registerengine; do
+            [ "$copy" = "$canon" ] && continue
+            [ -d "$copy" ] || continue
+            if ! diff -rq -x __pycache__ "$canon" "$copy" >/dev/null; then echo "stale copy: $copy differs from $canon (task registerengine:sync)"; rc=1; fi
+          done
+          [ "$rc" -eq 0 ] && echo "register-engine library copies are up to date"
+          exit "$rc"
+
+  registerengine:sync:
+    desc: 'Copy src/register-engine/registerengine/ over every Feature''s vendored copy of it (src/<id>/registerengine/), after a change to register-engine''s library; bump each Feature that carries a copy.'
+    silent: true
+    cmds:
+      - cmd: |
+          for copy in src/*/registerengine; do
+            [ "$copy" = src/register-engine/registerengine ] && continue
+            [ -d "$copy" ] || continue
+            rm -rf "$copy" && cp -r src/register-engine/registerengine "$copy" && rm -rf "$copy/__pycache__" && echo "synced $copy"
+          done
+
+  bundle:check:
+    desc: 'Fail if the facilitator Feature''s copy of the node bundle script (src/facilitator/bundle-build.sh, with which the Feature builds the bundle from its own source when no released bundle is pinned) differs from bundles/facilitator/install.sh. Run `task bundle:sync` to refresh it. Part of lint.'
+    silent: true
+    cmds:
+      - cmd: |
+          if cmp -s bundles/facilitator/install.sh src/facilitator/bundle-build.sh; then echo "the bundle script copy is up to date"; exit 0; fi
+          echo "stale copy: src/facilitator/bundle-build.sh differs from bundles/facilitator/install.sh (task bundle:sync)"; exit 1
+
+  bundle:mcp-wheels:
+    desc: 'Regenerate the pinned `mcp` wheel table (HTTP_WHEELS) of bundles/facilitator/install.sh for MCP=<version> (the dependency closure from pip for CPython 3.13, then each wheel''s SHA-256 and URL from PyPI''s JSON API: pure wheels once, native ones per architecture, the cp313 or abi3 manylinux wheel of glibc 2_28 or older), then copies the script over src/facilitator/bundle-build.sh. CHECK=1 only compares and exits 1 on a difference (it reproduces the table for 2.3.0). Needs network; bump the facilitator Feature after a change.'
+    cmds:
+      - python3 -I bundles/facilitator/mcp-wheels.py "{{.MCP}}"{{if .CHECK}} --check{{end}}
+      - '{{if not .CHECK}}install -m 0755 bundles/facilitator/install.sh src/facilitator/bundle-build.sh{{else}}true{{end}}'
+
+  bundle:sync:
+    desc: 'Copy bundles/facilitator/install.sh over src/facilitator/bundle-build.sh after a change to the bundle script; bump the facilitator Feature.'
+    silent: true
+    cmds:
+      - install -m 0755 bundles/facilitator/install.sh src/facilitator/bundle-build.sh && echo "synced src/facilitator/bundle-build.sh"
+
+  bundle:build:
+    desc: 'Build the facilitator node bundle for one architecture into dist/ (facilitator-<version>-linux-<arch>.tar.gz and its SHA256SUMS line) with bundles/facilitator/install.sh: ARCH=amd64|arm64 (default: this machine''s; arm64 on amd64 is a cross build, no emulation), ASSETS=<folder> serves the upstream downloads offline, OUT=<folder> instead of dist. Never root; the release-bundle workflow runs the same script.'
+    vars:
+      ARCH: '{{.ARCH | default ""}}'
+      OUT: '{{.OUT | default "dist"}}'
+      ASSETS: '{{.ASSETS | default ""}}'
+    cmds:
+      - bash bundles/facilitator/install.sh --out "{{.OUT}}"{{if .ARCH}} --arch {{.ARCH}}{{end}}{{if .ASSETS}} --assets "{{.ASSETS}}"{{end}}
+
+  bundle:stage:
+    desc: 'Stage a bundle built by bundle:build into src/facilitator/bundle/ (git-ignored), with its SHA256SUMS line, so that `task test FEATURE=facilitator` installs that bundle rather than building one from source; the Feature still checks it against its SHA256SUMS, and against digests.txt when pinned. ARCH and OUT as bundle:build; `task bundle:stage -- clean` removes the staged folder.'
+    silent: true
+    vars:
+      ARCH: '{{.ARCH | default ""}}'
+      OUT: '{{.OUT | default "dist"}}'
+    cmds:
+      - cmd: |
+          set -eu
+          if [ "{{.CLI_ARGS}}" = clean ]; then rm -rf src/facilitator/bundle && echo "removed src/facilitator/bundle"; exit 0; fi
+          arch="{{.ARCH}}"; [ -n "$arch" ] || case "$(uname -m)" in aarch64|arm64) arch=arm64 ;; *) arch=amd64 ;; esac
+          v="$(bash bundles/facilitator/install.sh --version)"
+          asset="facilitator-$v-linux-$arch.tar.gz"
+          [ -f "{{.OUT}}/$asset" ] || { echo "no {{.OUT}}/$asset: task bundle:build ARCH=$arch"; exit 1; }
+          mkdir -p src/facilitator/bundle
+          cp "{{.OUT}}/$asset" src/facilitator/bundle/
+          grep "  $asset\$" "{{.OUT}}/SHA256SUMS" >src/facilitator/bundle/SHA256SUMS
+          echo "staged src/facilitator/bundle/$asset"
+
+  bundle:image:
+    desc: 'Build the facilitator node image (bundles/facilitator/Dockerfile) from the bundle in dist/ (OUT=<folder> otherwise) for this machine''s architecture, tagged facilitator-node:<version>-local; the release-node-image workflow builds the published one from the released asset. Needs a Docker daemon.'
+    silent: true
+    vars:
+      OUT: '{{.OUT | default "dist"}}'
+    cmds:
+      - cmd: |
+          set -eu
+          v="$(bash bundles/facilitator/install.sh --version)"
+          docker build -t "facilitator-node:$v-local" --build-arg "BUNDLE_VERSION=$v" -f bundles/facilitator/Dockerfile "{{.OUT}}"
+
+  facilitator:workstation-hub:
+    desc: 'The lasting facilitator hub on this workstation''s Rancher Desktop Kubernetes (workstation-hub): renders, applies, shows the status of or deletes the git-ignored overlay .devcontainer/facilitator-workstation (kustomization.yaml, mesh.yml, facilitator.yml) in the namespace facilitator. -- render | apply | status (the default) | delete. Always --context rancher-desktop, never another cluster. delete removes the namespace and with it the hub''s volume (its CA); the person-only commands (node invite, issuer export-root) are run by the Operator with kubectl exec.'
+    silent: true
+    cmds:
+      - cmd: |
+          set -eu
+          d=.devcontainer/facilitator-workstation
+          [ -f "$d/kustomization.yaml" ] || { echo "no overlay at $d (git-ignored, one per workstation): copy bundles/facilitator/k8s/overlays/rancher-desktop there and adapt it (see src/facilitator/NOTES.md, Hub on Kubernetes)" >&2; exit 1; }
+          k() { kubectl --context rancher-desktop -n facilitator "$@"; }
+          case "{{.CLI_ARGS}}" in
+            render) kustomize build "$d" ;;
+            apply) kustomize build "$d" | kubeconform -strict -summary && kustomize build "$d" | kubectl --context rancher-desktop apply -f - && k rollout status statefulset/facilitator-hub --timeout=240s ;;
+            delete) kubectl --context rancher-desktop delete namespace facilitator ;;
+            ""|status) k get pods,svc,pvc && k exec facilitator-hub-0 -- facilitator check ;;
+            *) echo "usage: task facilitator:workstation-hub -- render|apply|status|delete" >&2; exit 2 ;;
+          esac
+
+  bundle:k8s:
+    desc: 'Render the facilitator hub''s kustomize base and its overlays (bundles/facilitator/k8s: base, overlays/rancher-desktop, overlays/ssh-agent) with kustomize and check each with kubeconform (-strict, the Kubernetes schemas of KUBERNETES_SCHEMA_VERSION): the StatefulSet with a volume, mesh.yml in a ConfigMap, a Service for SLIM and the join endpoint only. -- <overlay> renders one to standard output (task bundle:k8s -- overlays/rancher-desktop). kustomize and kubeconform come from the kustomize and kubeconform Features when they are on PATH at the pinned version, else the pinned, checksummed ones are fetched into ~/.cache/facilitator-k8s-tools (test/facilitator/k8s/tools.sh). Needs network for the schemas; not part of lint.'
+    silent: true
+    cmds:
+      - cmd: |
+          set -eu
+          . test/facilitator/k8s/tools.sh
+          fac_tools kustomize kubeconform
+          if [ -n "{{.CLI_ARGS}}" ]; then exec kustomize build "bundles/facilitator/k8s/{{.CLI_ARGS}}"; fi
+          for o in base overlays/rancher-desktop overlays/ssh-agent; do
+            echo "== $o"
+            kustomize build "bundles/facilitator/k8s/$o" | kubeconform -strict -summary -kubernetes-version "$KUBERNETES_SCHEMA_VERSION"
+          done
+          bash test/facilitator/k8s/shape.sh
+
+  bundle:pin:
+    desc: 'The manual fallback of the release-facilitator workflow''s pin stage: download the release facilitator-bundle-v<version> (`task bundle:pin -- 0.3.0`), check each asset against its SHA256SUMS, the digest GitHub records for it and its build attestation (gh attestation verify), add the lines to src/facilitator/digests.txt, say so in the CHANGELOG and re-render the README, for the pull request that pins the bundle (.github/scripts/pin-bundle.sh, the same script the workflow runs). Needs gh, logged in.'
+    silent: true
+    cmds:
+      - cmd: |
+          v="{{.CLI_ARGS}}"; [ -n "$v" ] || { echo "usage: task bundle:pin -- <bundle version>"; exit 2; }
+          bash '{{.TASKFILE_DIR}}/.github/scripts/pin-bundle.sh' "$v"

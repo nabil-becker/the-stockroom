@@ -1,0 +1,3 @@
+# The Dockerfile copies only from pinned images, so nothing in .devcontainer/ (.env, the
+# launcher) belongs in the build context sent to the Docker daemon.
+*

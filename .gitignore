@@ -1,0 +1,5 @@
+
+# devcontainer task settings - may hold host-specific paths
+.devcontainer/.env
+/.venv/
+__pycache__/

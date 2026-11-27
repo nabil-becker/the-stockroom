@@ -1,0 +1,14 @@
+# The stockroom's own Python tooling (not a package). `task env:setup` syncs .venv from uv.lock
+# with the uv-managed interpreter that .python-version names, the same on every machine and in CI.
+[project]
+name = "stockroom-tools"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = ["semversioner==3.1.0"]
+
+[tool.uv]
+package = false
+# Never a system Python: a download of the exact build uv pins, whatever the machine has.
+python-preference = "only-managed"
+# .venv sits on the workspace mount, uv's cache in the container; a hard link cannot span them.
+link-mode = "copy"

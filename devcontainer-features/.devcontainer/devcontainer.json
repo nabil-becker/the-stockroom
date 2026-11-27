@@ -1,0 +1,16 @@
+{
+  "name": "Stockroom Feature development",
+  "build": { "dockerfile": "Dockerfile" },
+  "initializeCommand": ["task", "-d", "${localWorkspaceFolder}", "features:stage"],
+  "features": {
+    "ghcr.io/devcontainers/features/powershell:1": {
+      "version": "7.6.7",
+      "modules": "Pester==6.2.0,PSScriptAnalyzer==1.25.0"
+    },
+    "ghcr.io/devcontainers-extra/features/yamllint:2": { "version": "1.38.0" },
+    "./features/go-task": { "version": "3.54.0" },
+    "./features/devcontainer-cli": {},
+    "./features/component-registry": {}
+  },
+  "remoteUser": "vscode"
+}

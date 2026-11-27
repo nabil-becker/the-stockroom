@@ -1,0 +1,30 @@
+version: '3'
+
+# uv runs the tool in .venv, synced from uv.lock first (--locked: refuse a stale lock).
+# Var names are unique: go-task merges included Taskfiles' vars.
+vars:
+  VERSIONING_PYTHON: uv run --locked python
+
+tasks:
+  status:
+    desc: Show the current version, next version and changesets for ARTIFACT.
+    requires: {vars: [ARTIFACT]}
+    cmds:
+      - '{{.VERSIONING_PYTHON}} tools/versioning/artifacts.py status {{shellQuote .ARTIFACT}}'
+
+  change:
+    desc: Record a major, minor or patch change for one ARTIFACT.
+    requires: {vars: [ARTIFACT, TYPE, DESCRIPTION]}
+    cmds:
+      - '{{.VERSIONING_PYTHON}} tools/versioning/artifacts.py change {{shellQuote .ARTIFACT}} {{shellQuote .TYPE}} {{shellQuote .DESCRIPTION}}'
+
+  prepare:
+    desc: Finalize pending changes and update one artifact's version in the worktree; never publish.
+    requires: {vars: [ARTIFACT]}
+    cmds:
+      - '{{.VERSIONING_PYTHON}} tools/versioning/artifacts.py prepare {{shellQuote .ARTIFACT}}'
+
+  check:
+    desc: Check packaging versions against their independent Semversioner histories.
+    cmds:
+      - '{{.VERSIONING_PYTHON}} tools/versioning/artifacts.py check'

@@ -1,0 +1,6 @@
+# Everything here runs in Linux containers: LF on every platform, whatever
+# core.autocrlf says (a Windows clone otherwise breaks every shebang).
+* text=auto eol=lf
+
+# The backlog (TODO.md) and the ledger (docs/ledger/*.md) left git on 2026-11-04 (records-out-of-git):
+# the union and devhost-todo merge drivers they used are no longer needed here.

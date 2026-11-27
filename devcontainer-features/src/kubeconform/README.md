@@ -1,0 +1,178 @@
+
+# kubeconform (kubeconform)
+
+Installs kubeconform (https://github.com/yannh/kubeconform), the fast Kubernetes manifest validator, as a release binary at /usr/local/bin/kubeconform, verified against the release's CHECKSUMS file.
+
+## Example Usage
+
+```json
+"features": {
+    "ghcr.io/nabil-becker/devcontainer-features/kubeconform:1": {}
+}
+```
+
+## Options
+
+| Options Id | Description | Type | Default Value |
+|-----|-----|-----|-----|
+| installTaskfile | Also install this Feature's Taskfile into /usr/local/share/go-task/includes.d so its tasks appear under the <id>: namespace of a root Taskfile that includes /usr/local/share/go-task/features.yml (see the go-task Feature). | boolean | true |
+| version | kubeconform release to install (e.g. '0.8.0', with or without a leading 'v'), or 'latest'. Pin it to what your CI uses. | string | latest |
+
+## How it fits
+
+```text
+  manifest files --> kubeconform --> schemas fetched over HTTPS at run time
+  kustomize build | kubeconform   (task kubeconform:validate:kustomize)
+  (reads no KUBECONFIG; contacts no cluster)
+```
+
+| Data | Where it lives | Storage tier |
+| --- | --- | --- |
+| Nothing | installs a binary only; no volume, no hook | none |
+
+Tiers are the four of ADR 0045: 1 git, 2 shared folder, 3 personal folder, 4 working set (rebuildable only).
+
+Used in: [kubernetes-toolbox](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/reference-architectures/kubernetes-toolbox.md)
+
+## What it installs
+
+The `kubeconform` release binary from `github.com/yannh/kubeconform`, at
+`/usr/local/bin/kubeconform`. `install.sh` downloads
+`kubeconform-linux-<arch>.tar.gz` and the release's `CHECKSUMS` file, checks
+the tarball with `sha256sum -c`, and installs the binary only if the check
+passes. It runs `kubeconform -v` at the end, so the version is in the build
+log.
+
+- `version` takes a number with or without a leading `v` (`0.8.0`,
+  `v0.8.0`), or `latest` (the default). `latest` is resolved once, at image
+  build time, through the `releases/latest` redirect (no API call, no
+  token), so two builds a month apart can differ. Pin it.
+- `curl`, `ca-certificates` and `tar` are installed with `apt-get` only when
+  missing; on an image without `apt-get` the build fails.
+- Architectures: `x86_64`/`amd64`, `aarch64`/`arm64`, and `armv7l`, which
+  takes the upstream `armv6` asset. Any other `uname -m` fails the build.
+
+## Options
+
+- `version` (default `latest`): change it to the version your CI runs, so
+  local and pipeline results agree. A value that is not a `x.y.z` number
+  fails the build.
+- `installTaskfile` (default `true`): set it to `false` when you do not use
+  the go-task registry and do not want
+  `/usr/local/share/go-task/includes.d/kubeconform.yml` in the image.
+
+There is no run-time override; the version is fixed at build.
+
+## State
+
+No state: installs a binary only. No volume, no `containerEnv`, no
+post-create hook. It does not read `KUBECONFIG` either: kubeconform works
+offline on manifest files, so it needs nothing from `kube-state`. (The
+schemas are fetched over HTTPS at validation time, see Limits.)
+
+## Minimal `devcontainer.json`
+
+```json
+"features": {
+  "ghcr.io/nabil-becker/devcontainer-features/kubeconform:1": {
+    "version": "0.8.0"
+  }
+}
+```
+
+Drop the `version` line to follow the newest release at each image build.
+
+## Verify it works
+
+```bash
+kubeconform -v          # prints the installed version
+task kubeconform:version
+```
+
+The build log carries the same line (`kubeconform: downloading kubeconform
+v<version> (kubeconform-linux-<arch>.tar.gz)...`, then the `-v` output). A
+failed checksum stops the build with `sha256sum`'s `FAILED` line. There is
+no post-create line: nothing runs after the build.
+
+## Composition
+
+- `installsAfter` orders it behind this collection's `go-task` Feature (so
+  the Taskfile registry exists and is refreshed) and the official
+  `common-utils`.
+- Pairs with [`kustomize`](../kustomize): `task kubeconform:validate:kustomize`
+  renders with `kustomize build` and pipes the output to kubeconform. The
+  `kustomize` binary must be on PATH.
+- It augments no official Feature and replaces none.
+- Independent of `kube-state`: no cluster is contacted.
+
+## Tasks
+
+With `installTaskfile` on, and a root Taskfile that includes the go-task
+registry, these appear under `kubeconform:`:
+
+- `kubeconform:version`: show the installed version.
+- `kubeconform:validate`: validate `TARGET` (a file or directory, default
+  `.`) against the Kubernetes and CRD schemas; extra flags go after `--`.
+- `kubeconform:validate:kustomize`: render the kustomization in `DIR`
+  (default `.`) with `kustomize build` and validate the output.
+
+Both validate tasks use `KUBECONFORM_FLAGS` (default
+`-strict -summary -ignore-missing-schemas`; setting it replaces the
+defaults) and `CRD_CATALOG` (default: the community datree catalog at
+`https://raw.githubusercontent.com/datreeio/CRDs-catalog/main`). Without the
+tasks, the same check by hand:
+
+```bash
+kustomize build overlays/prod | kubeconform -strict -summary \
+  -schema-location default \
+  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+```
+
+## Limits and troubleshooting
+
+- Linux only, on the three architectures above; unsupported ones fail with
+  `unsupported architecture`.
+- `could not resolve a kubeconform version`: `latest` could not be resolved
+  (no network or no redirect) or `version` is not a number. Pin an explicit
+  version or fix the network.
+- A missing release asset or `CHECKSUMS` line fails the build (`curl -f`, or
+  `sha256sum` finding no matching line). The binary is never installed
+  unchecked.
+- Validation needs network: the default and datree schema locations are
+  fetched over HTTPS. Offline, kubeconform cannot find CRD schemas; with the
+  default `-ignore-missing-schemas` they are skipped silently rather than
+  failing, so a green run offline checks less than it seems to. Point
+  `CRD_CATALOG` at a mirror, or drop the flag via `KUBECONFORM_FLAGS`.
+- `-strict` rejects unknown fields; remove it through `KUBECONFORM_FLAGS` if
+  a manifest carries extension fields on purpose.
+
+## Why this one exists
+
+No published Dev Container Feature for kubeconform is known to this
+repository, so there is no alternative to compare.
+
+## Changes
+
+### [1.0.5] - 2026-11-03
+
+#### Changed
+
+- The README now has a "How it fits" section with a small diagram of how the Feature sits in a devcontainer, a table of the data it keeps and the storage tier of each, and "Used in" links to the reference architectures that use it. Documentation only: the Feature itself is unchanged. Nothing to do.
+
+### [1.0.4] - 2026-11-03
+
+#### Added
+
+- This changelog: every release of this Feature now has an entry here, written for its users, and the Feature's README shows the latest three under "Changes". Nothing to do.
+
+### [1.0.3] - 2026-10-28
+
+#### Fixed
+
+- Build-time downloads retry on transient network errors, so a flaky connection no longer fails the container build outright. Rebuild the container to pick it up. No change to options or tasks; nothing to do. ([#94](https://github.com/nabil-becker/devcontainer-features/pull/94))
+
+The full history is in [CHANGELOG.md](https://github.com/nabil-becker/the-stockroom/blob/main/devcontainer-features/src/kubeconform/CHANGELOG.md).
+
+---
+
+_Note: This file was auto-generated from the [devcontainer-feature.json](https://github.com/nabil-becker/the-stockroom/blob/main/devcontainer-features/src/kubeconform/devcontainer-feature.json).  Add additional notes to a `NOTES.md`._

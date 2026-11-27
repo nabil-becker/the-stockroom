@@ -1,0 +1,37 @@
+# The foundation: what the Operator named as carried from one iteration to the next.
+# One repository-relative path per line; `!path` marks a file copied untouched.
+# The tooling is not foundation (the OS is not the package). Settled in the closing interview of
+# iteration 3 (docs/iterations/interview-3.md, questions 11 to 14).
+#
+# The agent principles. The Feature non-functional requirements stay here: they belong to this
+# project's product, not to the way of working.
+docs/principles/agents.md
+# This project's lexicon and process, carried as worked examples: the next project builds its own
+# (devhost-init scaffolds them). The ontology goes with the lexicon: shared words and the model of
+# how they relate, always exported together.
+LEXICON.md
+PROCESS.md
+docs/model/ontology.toml
+# The decisions that explain the way of working, so the next project knows the why. The theme
+# ADRs (0004, 0007) stay in this repository, out of the seed: a theme is personalization (interview 3, questions 11 and 19).
+docs/adr/0003-backs-only-add-so-change-stakes-become-amend-items.md
+docs/adr/0005-the-ontology-is-the-canonical-model-and-a-guard-keeps-the-rest-in-line.md
+docs/adr/0006-the-docs-site-is-built-by-a-script-and-hosting-is-a-swappable-skill.md
+docs/adr/0008-the-iteration-package-carries-papers-forward-and-merges-the-foundation.md
+docs/adr/0009-the-journalist-is-a-skill-in-the-iteration-package-not-a-back.md
+docs/adr/0011-the-feature-and-agent-principles-are-binding.md
+docs/adr/0013-the-agent-principles-are-trimmed-to-five-generic-ones.md
+docs/adr/0014-the-seed-is-exported-and-imported-by-two-skills-and-the-journalist-is-folded-into-the-export.md
+docs/adr/0015-shutdown-is-a-check-script-a-skill-and-a-host-stop-task-because-the-spec-has-no-stop-hook.md
+docs/adr/0016-the-bot-identity-applies-only-to-git-run-by-an-agent.md
+# The branch rule and the git identity decisions, added for the next export (interview 4, answer 9):
+# 0017 names every branch after a backlog id and a workstream number; 0002 keeps agent co-author
+# addresses unclaimable; 0012 and 0016 say how the identity is applied (the Git Feature wrapper,
+# only to git an agent runs). ADR 0001 is superseded by 0012 and stays out.
+docs/adr/0017-every-branch-name-carries-a-backlog-id-and-a-workstream-number.md
+docs/adr/0002-agent-co-author-trailers-use-unclaimable-addresses.md
+docs/adr/0012-agent-git-identity-through-the-git-feature-wrapper.md
+# The ledger's shape: where entries live, who writes them, the append-only rule. The monthly files
+# are records of this project, not foundation, so they stay out; ledger-review is already a default
+# skill of the seed (interview 4, answer 9).
+docs/ledger/README.md

@@ -1,0 +1,560 @@
+## How it fits
+
+```text
+  host: task devcontainer:agent -- <name> --> container: claude (native binary)
+                                                    |        |
+   participant component <-- agent-adapter-claude --'        |
+   (participants: true, or the deprecated agents Feature;    |
+    task agents -- <name>, agents up at container start)     v
+              volume: CLAUDE_CONFIG_DIR  (login, settings, sessions)
+              (a repo may bind-mount a host folder on the same target)
+```
+
+| Data | Where it lives | Storage tier |
+| --- | --- | --- |
+| Login, settings, session history, adapter's session list | named volume at `CLAUDE_CONFIG_DIR` (`/var/lib/devcontainer-features/claude-code`); a repo may bind-mount a host folder there | 4 working set |
+| Agent list (with `participants: true`) | `.devcontainer/agents.yml` in the repository | 1 git |
+| Leases and start markers (with `participants: true`) | `/var/lib/devcontainer-features/agents`, not a volume; a lease must not survive a rebuild | 4 working set |
+
+Tiers are the four of ADR 0045: 1 git, 2 shared folder, 3 personal folder, 4 working set (rebuildable only).
+
+Used in: [windows-workstation-devhost](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/reference-architectures/windows-workstation-devhost.md), [agentic-devhost](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/reference-architectures/agentic-devhost.md)
+
+## Participants (`participants`, 1.10.0)
+
+`"participants": true` installs the **participant component**: the agent list
+(`.devcontainer/agents.yml`, or the repo-relative path in `AGENTS_FILE`), the `agents` command, the
+`agents:*` tasks (`task agents -- <name>`, `agents:list`, `agents:up`, `agents:stop`, `agents:logs`,
+`agents:reset`, `agents:leases`, `agents:release`, `agents:check`, `agents:version`), the lease, the
+session names and `agents up` at every container start. It is the code of the
+[`agents`](../agents) Feature 2.1.3, moved unchanged into a shared component (ADR-0061); the
+`agents` Feature is deprecated from 2.2.0 in favour of this option. How each verb, kind and key
+behaves is in the [`agents` notes](../agents), which stay the reference until the component's own
+page exists.
+
+- **One copy.** The component lands in `/usr/local/lib/dcf-participant` (`agents.sh`, the
+  Taskfile, `COMPONENT_VERSION`, `installed-by`), with `/usr/local/bin/agents` a symlink to it and
+  the Taskfile at `/usr/local/share/go-task/includes.d/agents.yml` (when `installTaskfile` is on).
+  Any other Feature that carries the component (the `agents` Feature 2.2.0 does) finds it there
+  and installs nothing of it, unless its own copy is newer, which then replaces it.
+- **At container start** the Feature's `postStartCommand`, `claude-code-post-start`, runs
+  `agents up --post-start` (every resident agent made to run in the background, never fatal). It
+  does nothing when `participants` is off, and leaves the run to the `agents` Feature's own hook
+  when that Feature is also installed.
+- **Session names:** the template is `AGENTS_SESSION_NAME` (the task variable, `.env`,
+  `.devcontainer/.env` or the environment) or an agent's own `session-name` key in the list; the
+  default is the agent's handle. This Feature has no `sessionName` option: the `agents` Feature's
+  option of that name still works while that Feature is installed.
+- **Moving from the `agents` Feature:** set `"participants": true` here and remove the `agents`
+  line. Nothing else changes: the same tasks, the same command, the same `agents.yml` and
+  `AGENTS_FILE`. A `sessionName` option on the `agents` Feature becomes `AGENTS_SESSION_NAME` in the
+  container's environment (`containerEnv`) or in `.devcontainer/.env`. Keeping both Features for a
+  while is fine: one copy is installed, and `task agents:version` and `task agents:check` print one
+  line, `deprecated: use claude-code participants: true`, until the `agents` line goes.
+
+Off (the default), nothing of the component is installed and the post-start hook prints nothing.
+
+### The list file and the keys (component 1.1.0, claude-code 1.11.0)
+
+The list is `.devcontainer/participants.yml`, the name to use, with `participants:` as the top-level
+key. `.devcontainer/agents.yml` and the key `agents:` are aliases and keep working. One key per file.
+
+| Where | Which file |
+| --- | --- |
+| `PARTICIPANTS_FILE` set (task variable, root `.env`, `.devcontainer/.env`, environment, in that order) | that path |
+| else `AGENTS_FILE` set | that path |
+| neither set, `participants.yml` exists | `.devcontainer/participants.yml` |
+| otherwise | `.devcontainer/agents.yml` |
+
+When both variables are set, or both default files exist, the first is read and the second ignored,
+with one warning on stderr that names both. A repository that only has `agents.yml` or `AGENTS_FILE`
+gets no warning and no change. An entry may also carry:
+
+- `attachment: mcp | pump | model`, how another Feature (the facilitator) attaches the participant;
+  any other value is refused with the file and line;
+- `description: "..."`, a line of text;
+- `skills: [a, b]` (or one `- value` per line), a list of names.
+
+The `agents` command reads and checks them and does nothing else with them. `agents list --json`
+prints them after `sessionName` (`"attachment"`, `"description"`, `"skills"` as an array), only for
+entries that set them, so the output of an older list is unchanged.
+
+**Agent definitions from the component registry** (component 1.3.0, claude-code 1.13.0; the
+`component-registry` Feature 1.6.0). A layer may define `agents/<name>` with a `model` and `skills`
+(the component-registry notes, "Agent definitions"). At the agent's start, after the registry
+resolves for the agent's path, the definition is read from the resolved view: its model goes to the
+adapter (below) and its skills replace the entry's `skills`. The registry wins for these two
+fields (the Operator's ruling of 2026-11-21), and sets nothing else. `agents check` shows what came from
+the registry and from which layers; `agents list --json` adds `"model"` when a definition sets one.
+
+## Deprecated in 1.7.0: claude-host, claude-fleet, claude-host-pin
+
+The [`agents`](../agents) Feature replaces them: a repository lists its agents in
+`.devcontainer/agents.yml` (name, CLI, kind, folder, args) and starts any of them with
+`task agents -- <name>` inside, `task devcontainer:agent -- <name>` from the host. No session id
+is pinned anywhere, so `HOST_SESSION`, the `claude-host-pin` hook and `SESSIONS` go. This
+release keeps the three scripts working; each prints one line on stderr saying it is deprecated
+and that **claude-code 2.0 removes it** (`claude-fleet` says it once, not again for the
+`claude-host` it calls). `task claude-code:host` and `task claude-code:fleet` say so in their
+descriptions. The migration for a consuming repository is in
+[docs/migrations/agents.md](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/migrations/agents.md).
+
+## The agents adapter (`agent-adapter-claude`, 1.7.0)
+
+Claude Code's adapter for the `agents` Feature, on PATH. The `agents` command calls it; nothing
+else should. The contract (verbs, exit codes) is in the `agents` Feature's notes.
+
+| Verb | What it runs |
+| --- | --- |
+| `start-bg` | `cd <folder> && claude --bg --name <name> <args>`; waits until the session is listed and prints its id |
+| `wake` | the agent's newest stopped or failed session, by its full id: `cd <folder> && claude --bg --resume <session id>` (its conversation, under the same id on Claude Code 2.1.308, which says `woke session ... with its saved options (--name, ...)`; 2.1.314 may answer under a new id, which is recorded when it continues the conversation, 1.9.4), always bare (1.9.3); a line says when its saved options lack or differ from `--name <name> <args>`; extra saved options are no difference. If the session is gone (`source session <id> not found`, 1.8.6), has no transcript, or the wake crashes with "not found" within `AGENT_ADAPTER_SETTLE` seconds (1.9.4), the agent is started fresh as `start-bg` does, and stderr says so |
+| `attach` | `claude attach <id>` of its newest running session; an interactive one is refused with the pid and tty of the terminal that holds it. With none running, its newest ended one is woken first as `wake` does (bare, a new id recorded, the old one superseded) and the session that then runs is attached (1.9.6; it was `claude attach <id>` of the ended one, which let Claude Code restart it as an unrecorded copy) |
+| `resume` | `cd <folder> && claude --resume <session id> <args>` of its newest own conversation (1.9.5): its recorded session, its listed interactive sessions and the ended ones found only by their transcript in the folder (an interactive session leaves the list when it ends), newest by transcript; never a background session that is not its recorded one. Refused while one of them runs (a second process on one transcript). When the list cannot be read: `claude --resume <args>`, Claude Code's own picker (1.8.0) |
+| `new` | `cd <folder> && claude --name <name> <args>` |
+| `list` | `claude agents --json --all`: name, session id, state (a pid is running when that process is Claude Code's and runs here (1.9.6: a pid left by a container restart is not), a finished `done` session with a live process included (1.9.2); `blocked` without a live pid is stopped; failed; anything else stopped), folder, newest first |
+| `hint` | how to find and resume the agent by hand (`claude agents`; `cd <folder> && claude --resume`, pick it), for when the list cannot be read (1.8.0) |
+| `stop` | `claude stop <id>` of its newest running session; `--extras` stops every other running one instead. Never `claude rm`. |
+| `logs` | `claude logs <id>` |
+| `skills-show` | (1.14.0, optional, read-only) the agent's own folder, its skills, the personal folder and the registry's skills there, one tab-separated line each (`own`, `own-skills`, `shared`, `shared-skills`); `agents check` and `dcf-registry handovers --skills` print them |
+| (any start) | (1.13.0) `AGENT_MODEL`, the model of the agent's definition in the component registry (set by the participant component), is passed as `--model` on `start-bg`, `new` and `resume`, in place of any `--model` or `--model=` in the agent's arguments (the list's `args` and one start's extra arguments alike: the registry wins, the Operator's ruling of 2026-11-21; one line says what it replaced). A wake stays bare (its saved options); a value that is not one word is left out with a note |
+| `skills` | (1.12.0, optional in the contract, ADR-0064) copies the component registry's resolved skills (the folder in `COMPONENT_REGISTRY_SKILLS`, handed over by `dcf-registry handover`) into Claude Code's personal skills folder, `$CLAUDE_CONFIG_DIR/skills`; per agent (1.14.0, ADR-0074) the skills the agents' views disagree on go to the agent's own folder, read through `--add-dir`; `COMPONENT_REGISTRY_FORGET=1` drops it; never `claude`, never the repository's `.claude/skills`. See "Resolved skills" below |
+
+**Identity by name and folder, action by id.** A session is the agent's when its `cwd` is the
+agent's folder and its `name` is the agent's name, or that name with Claude Code's collision
+number (`host (2)`). `attach`, `stop` and `logs` take the session's short `id` from the list (the
+full `sessionId` when there is none), never the name: `claude attach host` also matches part of a
+name (`host-review`) and works only while the session runs, and `claude stop` takes an id only.
+A stopped session is woken by its full id with `--bg --resume`; `--bg -c` and `--bg --resume
+<name>` start copies, so the adapter never uses them. **Saved options (1.8.3).** Claude Code keeps the flags a background
+session was started with (`respawnFlags` in `$CLAUDE_CONFIG_DIR/jobs/<id>/state.json`) and puts them back on a bare
+wake; a flag given with `--bg --resume` starts a copy under a new id instead (`the flags you passed started a copy
+as <id>`). So 1.8.3 woke bare only when the saved options were exactly `--name <name>` and the agent's args
+(and its own `"state"` in that file an ended one), and otherwise passed them, accepting a copy rather than an agent
+without its options. **Corrected in 1.9.3:** a wake is always bare and extra saved options are no difference (see
+the CHANGELOG, 1.9.3). **Corrected in 1.9.1:** the state in that file is not
+authoritative (after a restart it still says `working` for a session that was idle, and a bare wake continues it), so
+it is no longer consulted; only the saved options are compared, and they keep the order they were given. `attach` of an
+ended session follows the same rule before it runs `claude attach <id>`. That file is Claude Code's
+own, not a documented interface: when it cannot be read the adapter wakes bare and says so (1.9.3). The name is set with `--name` at start and
+survives `/clear`, so nothing has to be written back. The JSON is read with `sed` (no jq or python
+in the Feature), as `claude-host` does. Needs Claude Code 2.1.290 or later (session names).
+
+**Records (1.8.0).** Claude Code can retitle a background session after a prompt, so the name given with `--name`
+does not always stay (a resident started as `framework` was listed as "d47 d50 personalization medallion"). No setting
+turns that off, and there is no command to rename a session from outside (Claude Code's docs: `-n`/`--name`, `/rename`
+and `Ctrl+R` in agent view; a name set with `/rename` is kept). So the adapter records, when it starts, wakes or opens
+an agent's session, the agent's name and folder with the session's short job id and full session id, in
+`$CLAUDE_CONFIG_DIR/agent-adapter-claude/agents.tsv` (the Feature's volume, so it survives a rebuild; folder 700,
+file 600; `AGENT_ADAPTER_CLAUDE_STATE` moves it; never in the repository, and not a pin: nothing has to be kept by
+hand). `new` chooses the session id itself (`--session-id`) and records it before the session starts. A recorded
+session still in `claude agents --json --all` is the agent's whatever its name now is, and `list` prints it under the
+agent's name and folder, before the agent's other sessions:
+
+- found by its job id with a new session id (a `/clear` starts a new conversation in the same job): followed, the
+  record updated, and said on stderr;
+- found by its session id under a new job id (a wake that started a copy): followed, updated, said;
+- not listed any more (removed): the name and folder find the agent, as before, and that is said.
+
+Matching by name, a running session (a pid, or a background state of working, blocked, busy, waiting or idle) always
+wins over ended ones (done, stopped, failed); an ended one is woken only when none runs. `start-bg` refuses when the
+agent's recorded session runs (never a second one).
+
+| Verb | What it runs |
+| --- | --- |
+| `record` | records the agent's running session (the one the lookup picks), or clears its record when none runs |
+| `session-busy <id>` | exit 0 when that session is mid-turn: `status` `busy` (a live process) or background `state` `working`; exit 1 when it is idle, `waiting` for input, `blocked` on a decision or ended; exit 3 when a running session says neither |
+| `session-stop <id>` | `claude stop` of the session with that id (from `list`); an interactive one is refused |
+| `session-remove <id>` | `claude rm` of that ended session (Claude Code keeps the transcript and a worktree with unpushed work); a running one is refused |
+
+**Reading the list (1.8.0).** `claude agents --json --all` runs within
+`AGENT_ADAPTER_CLAUDE_TIMEOUT` seconds (default 30), its output to files (a process that keeps a pipe
+open cannot hang it); plain `--json` is asked only when Claude Code refuses `--all` as unknown (an
+older release), since a list without the stopped sessions would wake nothing. The array is taken
+from the first line starting with `[` through its end, so a notice before or after it does no harm.
+A read that timed out or printed nothing is tried once more after `AGENT_ADAPTER_CLAUDE_PAUSE`
+seconds (default 3) with three times the time-out; a quick error with a message is not, since it
+would not change. A failure says the call, its exit code or time-out and its first line (cut to 160
+characters), for example
+
+```
+agent-adapter-claude: the session list could not be read: 'claude agents --json --all' exited 1: error: unknown option '--json'. A wrapper or alias in front of claude may be rewriting its arguments: claude here is /usr/local/bin/claude.
+```
+
+That one is what a wrapper putting `--add-dir <dir>` before every argument causes: `--add-dir`
+takes any number of folders, swallows `agents`, and plain `claude` refuses `--json`. Drop the
+wrapper and use the `additionalDirectories` option instead.
+
+Not verified against a live `claude --bg` in CI: the unit tests (`task test:claude-unit`) use a
+fake `claude`; the calls rest on the facts checked live on Claude Code 2.1.308 (the agents
+proposal, section 7). A background session in a folder Claude Code has never trusted fails to
+start (`Workspace not trusted`): run `claude` there once and accept.
+
+### Resolved skills (`skills`, 1.12.0)
+
+The `component-registry` Feature resolves skills from layers for who you are; this verb is how they
+reach Claude Code. `dcf-registry handover claude` (the participant component at every agent's start,
+or `/registry-refresh`) calls it with the skills folder in `COMPONENT_REGISTRY_SKILLS`: from
+component-registry 1.11.0 (claude-code 1.14.1, ADR-0077) the files **rendered from the `claude`
+templates** (the base layer's `templates/claude/SKILL.md.j2`, which gives each skill's `SKILL.md`
+byte for byte as the view holds it, or a layer's template that replaces it, changes one of its
+blocks, or adds a file such as `skills/<name>/checklist.md`); before, the view's own `skills/`. The
+verb copies whatever it is given; the file format is the template's, not this adapter's. A
+template that does not render fails the hand-over before this verb runs, so the skills already
+here stay. How to override a template: the component-registry notes, "Vendor templates".
+
+- Each resolved skill is copied into `$CLAUDE_CONFIG_DIR/skills/<name>/` (this Feature's volume,
+  tier 4, owner-only) with a `.component-registry` file marking it owned by the registry. An
+  unchanged skill is not rewritten; a changed one is replaced in one rename; an owned copy the
+  registry no longer resolves is removed.
+- A skill folder without the mark is yours (or another tool's): never changed or removed. The
+  registry's skill of that name is not installed, and one line says so.
+- Never the repository's `.claude/skills`: a resolved skill can carry personal facts.
+- Claude Code facts (the skills documentation, https://code.claude.com/docs/en/skills, checked
+  2026-11-19): a skills folder is watched and a change is picked up in the running session; a skills
+  folder that did not exist when the session started needs `/reload-skills`, so `claude-code-setup`
+  creates `$CLAUDE_CONFIG_DIR/skills` at every create and the verb creates it even when there is
+  nothing to copy (and says when it was new); a personal skill wins over a project skill of the
+  same name, so a resolved copy wins a clash with the repository's `.claude/skills`. A skill already
+  used in a conversation keeps its old text until it is used in a new conversation.
+
+### Each agent its own registry skills (1.14.0)
+
+The hand-over code (this verb, `skills-show`, the `--add-dir` folder and the start line) is the
+collection's shared helper `src/common/dcf-skills.sh`, carried inside the adapter and kept in step
+with Copilot's by `task common:check` (claude-code 1.14.2); only Claude Code's places and words are
+the adapter's own.
+
+Agents with different `registry-path`s in one container each read their own resolved skills, under
+one login and one Claude Code state ([ADR-0074](https://github.com/nabil-becker/devcontainer-features/blob/main/docs/adr/0074-each-agent-reads-the-skills-its-registry-path-resolves-through-an-added-directory-and-the-personal-folder-keeps-what-every-agent-shares.md)).
+
+```text
+  dcf-registry handover claude <agent> <folder> --as <its path>
+        | COMPONENT_REGISTRY_SKILLS = that path's view
+        v
+  $CLAUDE_CONFIG_DIR/registry-agents/<agent>.<sum>/want/      every agent's full view, kept
+        | split at each hand-over, under registry-agents/.lock
+        +--> $CLAUDE_CONFIG_DIR/skills/          what every agent's view has alike (personal:
+        |                                        every session, also one no agent started)
+        +--> registry-agents/<agent>.<sum>/registry/.claude/skills/
+                                                 the rest of that agent's view, read through
+                                                 claude ... --add-dir <that>/registry
+```
+
+- **Why the split.** Claude Code loads `.claude/skills` inside a folder given with `--add-dir`, and
+  watches it, but on a name clash a personal or a project skill wins and the added folder's runs as
+  `/<folder name>:<skill>`, here `/registry:<skill>` (https://code.claude.com/docs/en/skills,
+  "Resolve skills that share a name", checked 2026-11-20; Claude Code 2.1.309 or later). So a name
+  the agents' views disagree on is never personal. Where every agent shares one path, everything is
+  personal and the added folders are empty: the 1.12.0 behaviour.
+- **The flag.** `start-bg`, `new` and `resume` add `--add-dir <the agent's folder>` after the
+  agent's args (the flag takes several folders, so it goes last), once, and only after a hand-over
+  made the folder. A wake is bare (1.9.3): Claude Code puts back the options it saved, and when
+  those lack the flag (a session started before 1.14.0) the wake says so; `/add-dir <folder>` in
+  that session reads the agent's skills (the line names the folder).
+- **A project skill of the same name** (`<folder>/.claude/skills/<name>`) beats the agent's own copy;
+  the hand-over says so, and the registry's runs as `/registry:<name>`. The switch-over of the
+  component registry notes removes such committed copies.
+- **Cleanup.** `COMPONENT_REGISTRY_FORGET=1` (from `dcf-registry forget`, which `agents up` runs for
+  an agent no longer in the list) removes the agent's folder; an agent whose folder is gone is
+  dropped at any hand-over; the split is made again without it.
+- **Disk.** Each agent's view is kept twice at most (its `want` copy and its own folder), small text
+  files, in this Feature's volume (tier 4, owner-only).
+- **What you will see.** Each `start-bg`, `new` and `resume` that adds the flag prints one line on
+  standard error, for example
+  `agent-adapter-claude: rev: registry skills: 3 shared, 2 own -> --add-dir /var/lib/devcontainer-features/claude-code/registry-agents/rev.123/registry`
+  (`(already in its args)` at the end when the agent's own args name the folder), and one more line
+  per clash: `rev: registry skills: clash: the project's <folder>/.claude/skills/<name> wins in its
+  sessions; its own <name> runs as /registry:<name>.` An agent with no own folder gets no flag and
+  no line. Each hand-over says where the skills went and which project
+  skills win. `agents check` shows each agent's mode and, from the adapter's read-only
+  `skills-show <name> <folder>` verb, its own folder and the skills in it;
+  `dcf-registry handovers --skills` lists the same for every agent the registry handed skills to.
+- **Control.** The agents list key `registry-skills` per agent, else `COMPONENT_REGISTRY_SKILLS_MODE`
+  for the container (the task variable, `.env`, `.devcontainer/.env` or the environment), else
+  `split`:
+  - `split` (the default): as above.
+  - `shared`: the agent's whole view into the personal folder, no own folder and no flag: the 1.12.0
+    behaviour, where the latest hand-over wins for every session.
+  - `off`: nothing resolved or handed over for the agent; its own folder is dropped. Its sessions
+    still read the personal folder every Claude Code session reads.
+  An `--add-dir` to the agent's own folder already in its `args` (`--add-dir <it>`, `--add-dir=<it>`,
+  or among several folders after one `--add-dir`) is never added twice; an `--add-dir` to another
+  folder is kept as it is, and the agent's own is added after it.
+- **Namespaced skills** (component-registry 1.7.0) arrive by their folder name, `<namespace>--<name>`,
+  and are split, shown and checked for clashes by that name like any other skill.
+- **Limits** (accepted by the Operator, 2026-11-21). A committed project skill
+  (`<folder>/.claude/skills/<name>`) with the same name as an agent's own copy wins in that agent's
+  sessions; the own copy stays runnable as `/registry:<name>`, and the start line names the clash.
+  A plain `claude` started by hand (not through `agents`) gets no `--add-dir` and sees only the
+  shared skills. Today's only real case of the first is `architecture-review` in this repository,
+  and only if agents with different paths disagree on it; the committed copy is gone
+  (architecture-skill-switch-over), and with it the clash here.
+- **Not chosen:** a `CLAUDE_CONFIG_DIR` per agent (separate logins, session lists and jobs), the
+  `permissions.additionalDirectories` setting (file access only, it loads no skills), a plugin per
+  agent (every skill renamed `/<plugin>:<skill>`). ADR-0074 has the comparison.
+- **Not stated by Claude Code, and so not relied on:** whether `--add-dir` is saved in a background
+  session's options, and whether an added folder's skills folder created after the session started
+  is watched (the folder is made before the first start that passes it).
+
+## Additional working directories (`additionalDirectories`, 1.8.0)
+
+`"additionalDirectories": "/workspaces/shared, ~/notes"` gives every Claude session in the container
+those folders as working directories (read and edit them as it does the folder it starts in), the
+persistent form of `--add-dir`. The Feature writes them at build time as Claude Code's
+`permissions.additionalDirectories` to a managed-settings drop-in the image owns,
+`/etc/claude-code/managed-settings.d/50-devcontainer-features-claude-code.json`:
+
+```json
+{"permissions":{"additionalDirectories":["/workspaces/shared","/home/vscode/notes"]}}
+```
+
+- **Why there:** the user's own `settings.json` (in the Feature's volume) is never rewritten, and a
+  rebuild writes the file afresh, so a folder taken out of the option is gone again. Claude Code
+  combines lists across settings files, so folders from the user's, the project's or local settings
+  still apply beside these; managed settings need no workspace trust (a project's
+  `.claude/settings.json` list does).
+- **Paths:** comma-separated; absolute, or `~` / `~/...`, which the Feature expands at build time to
+  the remote user's home (the file holds absolute paths only). Spaces inside a path are kept, spaces
+  around a comma dropped. A relative path or `~user` fails the build with the reason. A folder need
+  not exist at build time (a mount appears later). Empty (the default): nothing is written.
+- **File access only:** unlike `--add-dir`, a folder listed in settings does not load its
+  `CLAUDE.md`, skills, subagents or other `.claude/` configuration (Claude Code's permissions docs,
+  "Additional directories grant file access, not configuration"). A repository that relied on that
+  keeps `--add-dir` for that one session, or moves the configuration into the repository.
+- **Limit:** managed settings rank by source, and by default (`managedSourcesBehavior`
+  `first-wins`) Claude Code uses only the highest source that holds a policy. When your organization
+  delivers server-managed settings (the claude.ai admin console) or an MDM policy, this file is
+  skipped and the folders do not apply; `/status` shows the `Setting sources` it used. That is not
+  verified here; tell us if it happens.
+
+**Migrating from a wrapper:** a repository that wraps `claude` (for example a `/usr/local/bin/claude`
+that runs the real one with `--add-dir <dir>` first) drops the wrapper and sets this option to the
+same folders. Such a wrapper also breaks every `claude <command>` (`--add-dir` swallows the
+command's name; `claude agents --json` then fails with `unknown option '--json'`), which is what
+`task agents:list` showed as `error`.
+
+## Augment, don't duplicate
+
+With the default `install: auto` this Feature keeps a `claude` that is
+already in the image and adds only the ecosystem pieces around it, so it
+composes with the official Feature:
+
+```json
+"features": {
+  "ghcr.io/devcontainers/features/node:1": { "version": "24" },
+  "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+  "ghcr.io/nabil-becker/devcontainer-features/claude-code:1": {}
+}
+```
+
+Pin Node to a major rather than the node Feature's default `lts`: when a new LTS lands, `lts`
+moves with it on the day, and Node 26.13.0 (2026-10-28) broke builds that way (it needs
+`libatomic1`, which Debian bookworm images lack, and its checksum was briefly unreadable).
+
+`installsAfter` orders this one after the official Feature (and after the
+`node` Feature it needs). On its own, or with `install: native`, it installs
+the native release binary instead: sha256-verified against the release
+manifest, pinnable with `version`, no Node.js. The official Feature pins no
+version and verifies nothing, which is why this installer still exists.
+
+What the Feature adds in both cases:
+
+- `agent-adapter-claude` on PATH (1.7.0, above).
+- With `additionalDirectories` set, the managed-settings drop-in under `/etc/claude-code/managed-settings.d` (1.8.0, above).
+- `claude-host` on PATH (deprecated in 1.7.0, see the top): start or resume **one** session by its UUID. With
+  `HOST_SESSION=<uuid>` set it runs `claude --resume <uuid>` when that
+  session's transcript exists for the current directory, else
+  `claude --session-id <uuid>` to create it; unset, a plain `claude` with a
+  hint. Names given with `/rename` are labels; the UUID (shown by `/status`)
+  is the handle. `task claude-code:host` inside, `task devcontainer:claude`
+  from the host machine (the `bootstrap/devcontainer.yml` include, which
+  reads `HOST_SESSION` from `.devcontainer/.env`). With
+  `CLAUDE_HOST_PRINT_FLAG=1` it instead prints that decision, `--resume <uuid>`
+  or `--session-id <uuid>`, on stdout and exits 0 without starting `claude`,
+  so a launcher of your own (detached `claude remote-control` sessions, say)
+  reuses it: `claude remote-control $(CLAUDE_HOST_PRINT_FLAG=1 claude-host)`.
+  With `HOST_SESSION` unset it prints nothing and exits 0; an invalid UUID is
+  still exit 2. Messages go to stderr.
+- **A running session is never started a second time** (claude-host, 1.5.0). `claude --resume
+  <id>` on a session that is still running opens a second process on the same transcript,
+  and `/clear` gives a session a new id, so the pinned id (`HOST_SESSION...` in
+  `.devcontainer/.env`) may not even be the running one. Before starting, `claude-host` reads
+  `claude agents --json` (fields `pid`, `sessionId`, `cwd`, as seen in Claude Code 2.1.308) and
+  looks for live sessions whose `cwd` is the current folder. Live means the entry has a
+  `pid`: the list also holds ended sessions, without one (or with `null` or `0`), which never
+  count.
+
+  | Live in this folder | claude-host does |
+  | --- | --- |
+  | nothing | as before: `--resume <pinned>` when its transcript exists, else `--session-id <pinned>` |
+  | one or more (the pinned id included) | starts nothing, prints each running id and pid and how to reach it (a background session: `claude attach <id>`; an interactive one, which `claude attach` cannot reach: the terminal that holds it, by pid and tty, to switch to, or Remote Control), exits 1; with `CLAUDE_HOST_PRINT_FLAG` it prints nothing and exits 1, so a wrapper does not start |
+  | any, `CLAUDE_HOST_ALLOW_SECOND=1` | starts by the rule of the first row |
+  | `claude agents --json` missing or failing (older Claude Code) | one-line note, then the first row |
+
+  When the pinned id is not one of the running ids, the refusal also says the pin is stale.
+  `CLAUDE_HOST_UPDATE_PIN=1` (manual path) then rewrites it when exactly one session runs:
+  `claude-host-pin --replace <old> <new>` changes the one `HOST_SESSION...` line holding the old
+  id in the first of the root `.env` and `.devcontainer/.env` that holds it (the lookup below; or `CLAUDE_HOST_ENV_FILE`; `CLAUDE_HOST_PIN_VAR=<name>`
+  restricts the variable), quotes kept, no other line touched, refusing unless exactly one line
+  holds it. `CLAUDE_HOST_LIVE_CHECK=0` skips the check. The JSON is read with `sed`, not jq or
+  python, which the Feature does not install. Deliberately not done: falling back to the newest
+  transcript of the folder when the pin is stale. It is too implicit; the hook below makes it
+  unnecessary.
+- **`claude-host-pin`: keep the pin equal to the running id** (opt-in SessionStart hook, 1.5.0; deprecated in 1.7.0).
+  The Feature manages no Claude Code settings, so a repository registers the hook in its
+  `.claude/settings.json`:
+
+  ```json
+  {"hooks": {"SessionStart": [
+    {"matcher": "startup|clear", "hooks": [{"type": "command", "command": "claude-host-pin"}]}
+  ]}}
+  ```
+
+  Claude Code gives a SessionStart hook its input as JSON on stdin (`session_id`, `cwd`,
+  `source`: `startup`, `resume`, `clear` or `compact`, among others). The hook finds
+  the repository's `.env` files upwards from `cwd` (or `CLAUDE_HOST_ENV_FILE`), in the order Task's
+  `dotenv: ['.env', '.devcontainer/.env']` reads them (the root, the folder holding `.devcontainer`: its
+  `.env`, then `.devcontainer/.env`; the first file that defines a variable wins, so the hook writes the
+  line in the file that holds it, and `claude-host` and `claude-fleet` read the same way; 1.6.1, before
+  that only `.devcontainer/.env` was looked at and a pin kept in the root `.env` went stale after a
+  `/clear`), picks the variable the
+  way `devcontainer:claude` does (the folder holding `.devcontainer` is the root:
+  `HOST_SESSION`; a sub-folder: `HOST_SESSION_<its name, upper-cased, other characters _>`,
+  `rooms/solis` gives `HOST_SESSION_SOLIS`) and writes `session_id` into that line, only when it
+  differs, keeping `export`, quotes, comments and every other byte of the file. A UUID is
+  required. A variable without a line is left alone (never adds one) unless
+  `CLAUDE_HOST_PIN_CREATE=1` appends `VAR=<id>` to `.devcontainer/.env` (no file holds the variable). It always exits 0, notes go to stderr, so a
+  session never fails because of it. The consumer's own write-back and second-copy check can go.
+- **`claude-fleet`: several sessions in one terminal, never a second copy** (1.5.0; 1.6.0 below; deprecated in 1.7.0). Bash
+  like `claude-host`, for the same reason (no jq, no python; the container always has
+  bash), installed beside it, run where `claude agents` runs. `SESSIONS` (environment, or
+  `SESSIONS_B64` base64-encoded) holds one line per session,
+  `name|session-variable|dir|extra claude args` (blank lines and `#` lines skipped; the
+  extra args are split on whitespace, no quoting). Each variable's value (the session's
+  UUID) comes from the `.env` files first (root `.env`, then `.devcontainer/.env`; the first file with a
+  line for the variable wins, as in Task), and from the environment only when none
+  has a line for that variable (1.6.0 reverses the earlier order: inside a session the
+  environment keeps the id the session started with, stale after a `/clear` or a fork, while
+  the `claude-host-pin` hook keeps `.env` current). For each line, against `claude agents --json`:
+  variable unset: said, skipped; its id live, or any live session working in its folder
+  (a `/clear`ed session has a new id there): running, not started (two or more live in
+  one folder are reported as duplicates, below); otherwise `cd <dir> && HOST_SESSION=<id> claude-host --bg <args>`
+  (claude-host's own live check is off for these starts, the fleet has made it; a live session is one with a `pid`, ended entries never count). Then
+  `exec claude agents`. `-- --plan` prints what it would do and starts nothing; `-- --no-view`
+  starts the missing ones and does not open the view. When the list cannot be read it
+  starts nothing and exits 1.
+
+  1.6.0, from a consuming repository's lessons running four agents in one container:
+  - **It waits for restored sessions.** After a rebuild the Claude daemon restores background
+    sessions from this Feature's volume; starting sessions in that window races the restore and
+    makes duplicates. Before reconciling, `claude-fleet` prints `waiting for restored
+    sessions…` and reads `claude agents --json` until two reads `FLEET_SETTLE_INTERVAL` seconds
+    apart (default 3) give the same set of live ids, for at most `FLEET_SETTLE_TIMEOUT` seconds
+    (default 30; then it reconciles anyway with a one-line note). `-- --no-wait` skips it.
+  - **Duplicates are reported, and stopped only on request.** When more than one live session
+    matches an agent (by its id or by its folder), `-- --plan` and a normal run list each one
+    (id, pid, age, whether a transcript exists) and mark the kept one (the id in `.env` if
+    live, else the newest by `startedAt`) and the extras, then print the `--stop-duplicates`
+    hint; nothing is stopped. `-- --stop-duplicates` stops the extras with `claude stop <id>`,
+    which keeps the conversation (`claude attach <id>` resumes it), re-reads the list to confirm
+    they are gone, and says so. A stopped extra is never restarted: the agent still has its kept
+    session. `claude-fleet` never deletes a session (`claude rm` can delete its worktree, which
+    is not Claude's to delete in a fleet); a test guards that.
+  - `claude-host`'s refusal reads each live session's `kind` from `claude agents --json`: for a
+    background session it names `claude attach <id>`; for an interactive one (`claude attach` fails
+    there with "No job matching") it says a terminal holds it, naming the pid and the tty (`ps -o tty=`), and
+    to switch to that terminal or use Remote Control (1.6.1). It also warns when the
+    `HOST_SESSION` in the environment is in no line of the `.env` files (it still uses it). `task claude-code:fleet` runs it inside (SESSIONS in the
+  environment); from the host, `task devcontainer:claude:fleet` (see the README), with
+  `SESSIONS` set where the Taskfile includes `bootstrap/devcontainer.yml`:
+
+  ```yaml
+  includes:
+    devcontainer:
+      taskfile: ./.devcontainer/cli_bootstrap.ignore/devcontainer.yml
+      vars:
+        SESSIONS: |
+          solis|HOST_SESSION_SOLIS|rooms/solis|--model sonnet
+          atlas|HOST_SESSION_ATLAS|rooms/atlas|
+  ```
+
+  A repository that scripted this itself (a `scripts/agents.py` that reads `claude agents
+  --json` and starts the missing sessions) can drop the script and keep only its
+  `SESSIONS` list. Not verified against a real `claude --bg` here: the tests use a fake
+  `claude`; `claude agents --json` output was read from Claude Code 2.1.308.
+- `CLAUDE_CONFIG_DIR=/var/lib/devcontainer-features/claude-code` in
+  `containerEnv` and a named volume mounted there, so login and sessions
+  survive rebuilds without any configuration (see below).
+- A `postCreateCommand` (`claude-code-setup`, also `task claude-code:setup`)
+  that creates `CLAUDE_CONFIG_DIR` and chowns it to the remote user, since
+  bind mounts and named volumes arrive root-owned, and reports what backs it
+  (volume, bind or image), writability and whether a login is present.
+- `DISABLE_AUTOUPDATER=1`: the binary is root-owned in every install mode, so
+  a user session could not replace it anyway; bump `version` (or leave it on
+  `stable`) and rebuild to update.
+
+## Keeping login and sessions across rebuilds
+
+Claude Code keeps credentials, settings and session history under `~/.claude`
+and the OAuth account / per-project trust in `~/.claude.json`. Setting
+`CLAUDE_CONFIG_DIR` moves *both* into one directory, so persisting that one
+directory is enough.
+
+By default nothing needs configuring: the Feature sets
+`CLAUDE_CONFIG_DIR=/var/lib/devcontainer-features/claude-code` and mounts the
+named volume `claude-code-config-${devcontainerId}` there (the pattern the
+official docker-in-docker Feature uses for its storage). The volume survives
+rebuilds and image updates. It does not survive a container-engine storage
+reset or a move to another engine, and `${devcontainerId}` changes when the
+checkout moves to another path, which leaves the old volume behind (`docker
+volume ls` shows it; remove it by hand).
+
+For the host disk (survives all of that; stays out of the checkout, so a
+synced checkout such as OneDrive never carries transcripts), the repo
+bind-mounts a host folder on the same target - a repo's `mounts` merge after
+the Features' and the last source on a target wins - and creates the folder
+with `initializeCommand` before the first start, since a bind mount with a
+missing source fails (array form: a string goes through `cmd /c` on Windows,
+which mangles quotes and `%VARS%`):
+
+```json
+"initializeCommand": ["task", "devcontainer:homes", "NAME=myrepo", "--", "claude"],
+"mounts": [
+  "source=${localEnv:USERPROFILE}/.devcontainer-homes/myrepo/claude,target=/var/lib/devcontainer-features/claude-code,type=bind"
+]
+```
+
+`CLAUDE_CONFIG_DIR` stays as the Feature sets it; the hook reports
+`claude-code: /var/lib/devcontainer-features/claude-code (bind, writable)`
+instead of `(volume, writable)` in the post-create log.
+
+Two containers on the same config dir at once (one from VS Code, one from
+the CLI) contend for `.claude.json.lock`; run one.
+
+## Best practices
+
+- **Run `claude` once in each agent's folder, and accept the trust prompt, before `agents up`.** `claude --bg` refuses a folder Claude Code has never trusted (`Workspace not trusted`), and a nested git worktree needs its own entry (2026-10-29, "Trust for agent folders ..."). If you edit the trust entry in `~/.claude.json` by hand, write a temp file, keep a backup and replace the file; never redirect a command's output onto the file it reads (2026-10-29, "Factcheck folder trusted in the Claude config, backup kept"; 2026-10-31, "Auto-mode settings merged into Claude settings; 27 lines confirmed", where a split paste emptied `settings.json`).
+
+## Anti-patterns
+
+### Don't wake a resident session with flags
+
+- **Don't:** run `claude --bg --resume <id>` with extra flags (or `--bg -c`, or `--resume <name>`) to wake an agent's session, or compare its saved options exactly with the agent's `args`.
+- **Why:** 2026-10-30, "Restart-wake bug fixed in claude-code 1.9.1, PR #131 open": a flag given with `--bg --resume` starts a copy under a new id, and Claude Code adds saved options the operator never passed (2026-10-30, "Resident wake stays bare; extra saved options no longer start a copy").
+- **Instead:** let the adapter wake: it is always bare, compares only the saved options it wants, and says when one is missing or changed (changed `args` apply at the next fresh start).
+- **Caught by:** the `agent-adapter-claude` cases in `task test:claude-unit` (a fake `claude`); the real CLI is not tested (nothing yet).
+
+### Don't count a wake as done because a process exists
+
+- **Don't:** treat a started process as a woken session, or record a session id before the wake has held.
+- **Why:** 2026-10-30, "Consumer's claude-code 1.9.2 findings triaged": waking a session with no transcript crashed after the adapter had already recorded it.
+- **Instead:** the adapter confirms the wake for `AGENT_ADAPTER_SETTLE` seconds (default 5), starts fresh when the transcript is missing, and never records a crashed attempt. The cost is up to about 45 s at `agents up` with nine residents.
+- **Caught by:** the settle and missing-transcript cases in `task test:claude-unit`; the 2.1.314 crash behaviour is modelled from a consumer's report, not run (open item `fork-detection-check`).
+
+### Don't trust a background-session record or a pid after a rebuild
+
+- **Don't:** wake, or `attach` to, a session whose record in the Feature's volume may name a process of a container that is gone.
+- **Why:** 2026-11-03, "Stale background record cleared before agent wake; copy becomes an error (#155)": after `up --remove-existing-container`, each `agents up` started two hidden copies of a resident (2026-10-31 and 2026-11-02, "RS1 copy-on-wake report logged for the agents Feature backlog").
+- **Instead:** the adapter removes the records proven dead (another pid namespace, no such pid, or another start time) before a wake, and a copy that still happens is stopped and reported as an error. Do not wrap the adapter in a retry loop: every repeat wake made another copy.
+- **Caught by:** the unit tests of 1.9.7 in `task test:claude-unit`, against a fake; nothing yet against a real background service (open item `second-copies-real-service`).
+

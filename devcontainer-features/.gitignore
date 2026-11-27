@@ -1,0 +1,32 @@
+# Task's remote-include cache and checksums
+.task/
+*.ignore
+
+# This repo's own devcontainer references the Features by local path; staged
+# copies of src/<id> by `task features:stage` (initializeCommand).
+.devcontainer/features/
+
+# Python bytecode from the devhost unit tests
+__pycache__/
+.devhost/redact-names.txt
+
+# Local environment files (secrets); a .env.example stays trackable.
+.env
+.env.*
+!.env.example
+
+# The generated homepage and the URL it was published at (devhost-site, publish-site skill)
+.devhost/site/
+.devhost/site-url
+
+# Pester -CI output (task test:bootstrap, the Lint workflow)
+testResults.xml
+
+# The facilitator node bundle: built locally (task bundle:build) and staged into the Feature for its tests
+# (task bundle:stage); a released bundle is a release asset, never a file in git.
+/dist/
+/src/facilitator/bundle/
+
+# The workstation's own facilitator hub overlay (task facilitator:workstation-hub): a kustomize overlay for this
+# machine's Rancher Desktop, kept out of git (workstation-hub).
+.devcontainer/facilitator-workstation/

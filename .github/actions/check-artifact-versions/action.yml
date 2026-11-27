@@ -1,0 +1,18 @@
+name: Check artifact versions
+description: Verify packaging metadata against Semversioner before publishing
+inputs:
+  scope:
+    description: Artifact type or artifact key to publish
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/setup-uv
+    - shell: bash
+      env:
+        SCOPE: ${{ inputs.scope }}
+        # Keep the environment out of the checkout the release then packages.
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/stockroom-versions
+      run: |
+        cd "$GITHUB_WORKSPACE"
+        uv run --locked python tools/versioning/artifacts.py check --scope "$SCOPE" --ready

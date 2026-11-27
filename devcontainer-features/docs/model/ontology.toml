@@ -1,0 +1,1548 @@
+# The ontology of the way of working: one canonical model of the base names.
+#
+# Canonical: LEXICON.md explains these ids in prose for people, docs/model/themes/*.toml only
+# label them, and the C4 views in docs/model/*.md draw them. `devhost-verify` (guard `model`)
+# keeps all of them agreeing with this file. The librarian back only adds (new ids, relations,
+# labels, diagram nodes); the host changes or removes.
+#
+# Layout: `types` and `predicates` are the closed sets; each `[id]` table is one base name
+# (kebab-case) with `type`, `term` (the bold term exactly as LEXICON.md writes it) and a
+# one-line `summary`; each `[[relation]]` joins two ids with a predicate.
+
+types = [
+  "role",
+  "record",
+  "mechanism",
+  "place",
+  "concept",
+  "product",
+]
+
+predicates = [
+  "is-a",
+  "contains",
+  "briefs",
+  "returns",
+  "writes",
+  "keeps",
+  "checks",
+  "decides",
+  "runs",
+  "reads",
+  "uses",
+  "publishes",
+  "builds",
+  "pulls",
+]
+
+[operator]
+type = "role"
+term = "The Operator"
+summary = "The person who owns the repository: asks, reviews, decides, ratifies."
+
+[engineer]
+type = "role"
+term = "Engineer"
+summary = "Anyone who works the repository with their own sessions; the Operator is one."
+
+[agent]
+type = "role"
+term = "Agent"
+summary = "Any model doing work for the repository: an inter or a back."
+
+[host]
+type = "role"
+term = "Host"
+summary = "The main session an engineer talks to; briefs cons and merges their work."
+
+[inter]
+type = "role"
+term = "Inter"
+summary = "An agent that works with an engineer, directly or through another inter."
+
+[back]
+type = "role"
+term = "Back"
+summary = "A background agent that keeps one record current after each turn; never works with a person."
+
+[scribe]
+type = "role"
+term = "Scribe"
+summary = "The back for the ledger."
+
+[secretary]
+type = "role"
+term = "Secretary"
+summary = "The back for the backlog; adds and ticks, never rewords."
+
+[librarian]
+type = "role"
+term = "Librarian"
+summary = "The back for the lexicon, the ADRs and the model; adds, never changes."
+
+[tester]
+type = "role"
+term = "Tester"
+summary = "The back with no model: runs the suite after a code change."
+
+[journalist]
+type = "concept"
+term = "Journalist"
+summary = "The brief (drop-a-seed/journalist.md) a writing subagent follows to draft the white paper; not a back (ADR 0009, ADR 0014)."
+
+[con]
+type = "role"
+term = "Con"
+summary = "A consult agent briefed by the host for one job; replies once in the hand-off shape."
+
+[devhost]
+type = "place"
+term = "Devhost"
+summary = "The dev container where sessions run and the backs act."
+
+[workstation]
+type = "place"
+term = "Workstation"
+summary = "An engineer's own machine outside the devhost."
+
+[worktree]
+type = "place"
+term = "Worktree"
+summary = "A separate checkout on its own branch where a con changes shared tooling."
+
+[storage-tier]
+type = "place"
+term = "Storage tier"
+summary = "One of four places data lives: git, shared folder, personal folder, working set."
+
+[custody]
+type = "concept"
+term = "Custody"
+summary = "What people hold outside every storage tier, such as unseal shares and the recovery key."
+
+[night-shift]
+type = "mechanism"
+term = "Night shift"
+summary = "A host session left open to work an agreed backlog list alone under a cap."
+
+[note]
+type = "concept"
+term = "Note"
+summary = "Something the Operator says that the repository must remember."
+
+[unit-of-work]
+type = "concept"
+term = "Unit of work"
+summary = "One thing asked and done or settled; one ledger entry each."
+
+[backlog]
+type = "record"
+term = "Backlog"
+summary = "TODO.md: the engineering items and the decisions for the Operator."
+
+[backlog-item]
+type = "record"
+term = "Backlog item"
+summary = "An engineering item that needs no external answer, named by its backlog id."
+
+[backlog-id]
+type = "concept"
+term = "Backlog id"
+summary = "The kebab-case slug that names a backlog item, never reused."
+
+[amend-item]
+type = "record"
+term = "Amend item"
+summary = "A backlog item amend-<id> asking a person to change an existing item."
+
+[decision]
+type = "record"
+term = "Decision for the Operator"
+summary = "A choice only the Operator can make, listed in the backlog with a recommendation."
+
+[brief]
+type = "concept"
+term = "Brief"
+summary = "What an inter gives a con: job, scope, model, isolation, reply shape."
+
+[hand-off]
+type = "concept"
+term = "Hand-off"
+summary = "The one reply shape: Outcome, Outputs, Friction, For the repository, Decisions needed."
+
+[model-sizing]
+type = "concept"
+term = "Model sizing"
+summary = "Matching the model to the blast radius of the work."
+
+[trial]
+type = "concept"
+term = "Trial"
+summary = "Running a new mechanism once on real work before the process describes it."
+
+[ledger]
+type = "record"
+term = "Ledger"
+summary = "The append-only record of what agents did, in monthly files."
+
+[ledger-entry]
+type = "record"
+term = "Entry"
+summary = "One ledger record, one per unit of work."
+
+[friction]
+type = "concept"
+term = "Friction"
+summary = "What a unit of work lacked, got wrong or had to work out."
+
+[measures]
+type = "concept"
+term = "Measures"
+summary = "The numbers of an entry, filled in by script from the transcripts."
+
+[ledger-review]
+type = "mechanism"
+term = "Review"
+summary = "Reading the cost report and the entries since the last review; run with /ledger-review."
+
+[architecture-review]
+type = "mechanism"
+term = "Architecture review"
+summary = "A subagent's check of a proposal against the NFRs, ADRs, capability matrix and lexicon before the Operator rules."
+
+[standing-architecture-set]
+type = "record"
+term = "Standing architecture set"
+summary = "The six living architecture documents, indexed in one README and updated in the pull request that builds a change."
+
+[[relation]]
+subject = "architecture-review"
+predicate = "checks"
+object = "standing-architecture-set"
+
+[delta]
+type = "concept"
+term = "Delta"
+summary = "The changed diagram or table a proposal carries for each standing architecture document it changes."
+
+[cost-report]
+type = "record"
+term = "Cost report"
+summary = "The monthly agent costs on one engineer's machine, rebuilt with no model."
+
+[list-price-estimate]
+type = "concept"
+term = "List-price estimate"
+summary = "Tokens priced at the published list price; measures use, not a charge."
+
+[adr]
+type = "record"
+term = "ADR"
+summary = "An architecture decision record for a decision whose reasoning needs room."
+
+[lexicon]
+type = "record"
+term = "Lexicon"
+summary = "LEXICON.md: the words of the way of working and what they mean."
+
+[journal]
+type = "record"
+term = "Journal"
+summary = "The record of the project's iterations, in plain words, add-only."
+
+[night-shift-report]
+type = "record"
+term = "Night-shift report"
+summary = "The morning report of a night shift, in docs/night-shift/."
+
+[hook]
+type = "mechanism"
+term = "Claude hook"
+summary = "A command Claude Code runs on an event, set in .claude/settings.json (SessionStart, Stop, SubagentStop, claude-host-pin)."
+
+[briefing]
+type = "mechanism"
+term = "Briefing"
+summary = "What an inter is told at session start by devhost-briefing."
+
+[stretch]
+type = "concept"
+term = "Stretch"
+summary = "The part of a transcript a back has not read yet, condensed."
+
+[stake]
+type = "mechanism"
+term = "Stake"
+summary = "One plain line left in a session when a chore might not be caught."
+
+[over]
+type = "mechanism"
+term = "Over"
+summary = "The word that ends a run of Operator messages: act on all of them now."
+
+[walkie-talkie]
+type = "mechanism"
+term = "Walkie-talkie"
+summary = "The skill that holds a run of Operator messages until over, switched on by invoking it or saying hold on or wait."
+
+[quiet-notice]
+type = "mechanism"
+term = "Quiet notice"
+summary = "How a back reports: one line of context on the next turn."
+
+[guard]
+type = "mechanism"
+term = "Guard"
+summary = "The script that undoes a back's run that changed what it may only add to."
+
+[name-guard]
+type = "mechanism"
+term = "Name guard"
+summary = "Replaces every redact-list name by the Operator in what a back writes."
+
+[metrics-line]
+type = "record"
+term = "Metrics line"
+summary = "The JSON line every back run appends to its runs.jsonl."
+
+[guards]
+type = "mechanism"
+term = "The guards"
+summary = "The commit-time checks of devhost-verify."
+
+[feature]
+type = "product"
+term = "Feature"
+summary = "A Dev Container Feature in `src/<id>`: the deliverable of this repository, installed by a devcontainer."
+
+[linter-cli-contract]
+type = "product"
+term = "Linter CLI contract"
+summary = "The shape a Feature's own check or transform tool takes: paths and `-`, `path:line: rule` and `--format`, exits 0/1/2, exceptions in a file, no knowledge of git or hooks (NFR-11, ADR 0035)."
+
+[consuming-repo]
+type = "product"
+term = "Consuming repo"
+summary = "A repository whose devcontainer pulls these Features; the office and software project 1 are two."
+
+[devcontainer]
+type = "product"
+term = "Devcontainer"
+summary = "A consuming repo's `.devcontainer/`: the container definition that lists the Features it uses."
+
+[feature-registry]
+type = "product"
+term = "Feature registry"
+summary = "Where released Features are published and pulled from: GHCR, listed on containers.dev."
+
+[release]
+type = "product"
+term = "Release"
+summary = "The manual workflow on `main` that publishes the Features to the registry."
+
+[local-feature]
+type = "product"
+term = "Local Feature"
+summary = "A Feature in `local-features/<id>` that this repository uses but does not publish; the devhost is one."
+
+[feature-taskfile]
+type = "product"
+term = "Feature Taskfile"
+summary = "The Taskfile a Feature ships for its tool, registered at build time."
+
+[feature-state]
+type = "product"
+term = "Feature state"
+summary = "What a Feature keeps outside the checkout: a named volume under `/var/lib/devcontainer-features/<id>` or host disk."
+
+[agent-place]
+type = "concept"
+term = "Place"
+summary = "What an agent knows about where it stands: who it serves (always the Operator) and its boundaries."
+
+[boundaries]
+type = "concept"
+term = "Boundaries"
+summary = "What an agent may and may not do, is responsible for, and consults; its row in a RACI chart."
+
+[agentic-delivery-os]
+type = "product"
+term = "Agentic Delivery OS"
+summary = "The product the Operator is building: tools that let one person bootstrap a devhost."
+
+[way-of-working]
+type = "concept"
+term = "Way of working"
+summary = "How work gets done here: the roles, the records, the improvement loop and the rules of thumb."
+
+[iteration]
+type = "concept"
+term = "Iteration"
+summary = "One project in which the way of working is tried and learned from."
+
+[cost-store]
+type = "record"
+term = "Cost store"
+summary = "The committed ids-and-numbers record beside the cost report; never drops committed rows."
+
+[shared-language]
+type = "concept"
+term = "Shared language"
+summary = "The lexicon and the ontology together: the agreed words and the model behind them."
+
+[white-paper]
+type = "record"
+term = "White paper"
+summary = "The account of one iteration, written once when the Operator calls it done."
+
+[iteration-package]
+type = "record"
+term = "Iteration package"
+summary = "What an iteration hands to the next: every earlier white paper plus the newest artifacts."
+
+[drop-a-seed]
+type = "mechanism"
+term = "Drop a seed"
+summary = "The export skill run when a project ends: interview, white paper, seed folder."
+
+[shutdown-check]
+type = "mechanism"
+term = "Shutdown check"
+summary = "The script that says whether the devhost can be stopped without losing work."
+
+[shutdown-and-restart]
+type = "mechanism"
+term = "Shutdown and restart"
+summary = "The skill pair that closes the devhost cleanly and brings it back where it was."
+
+[plant-a-seed]
+type = "mechanism"
+term = "Plant a seed"
+summary = "The import skill run in a new place: reads the seed, interviews, sets up, writes the first entry."
+
+[docs-site]
+type = "product"
+term = "Docs site"
+summary = "The one self-contained HTML page devhost-site builds from the docs and records."
+
+[name-exception]
+type = "record"
+term = "Name exception"
+summary = "A file the Operator approves that the forbidden-words guard skips; by file, never by word."
+
+[agent-principles]
+type = "concept"
+term = "Agent principles"
+summary = "The five generic principles (P1 to P5) of the way of working."
+
+[non-functional-requirement]
+type = "concept"
+term = "Non-functional requirement"
+summary = "One of ten requirements every work item touching a Feature must meet or record an exception for."
+
+[master-of-secrets]
+type = "concept"
+term = "Master of secrets"
+summary = "OpenBao as ADR-0048 gives it: keeps every private key and token and their lifecycle; ssh-agent only uses keys."
+
+[client-mode]
+type = "concept"
+term = "Client mode"
+summary = "The openbao Feature's default: the bao CLI against a server outside the container."
+
+[server-mode]
+type = "concept"
+term = "Server mode"
+summary = "The openbao Feature's other mode: a server in the container on its own volume, sealed until unsealed."
+
+[seal-and-unseal]
+type = "mechanism"
+term = "Seal and unseal"
+summary = "A sealed server cannot read its store; unsealing needs a quorum of the unseal shares."
+
+[unseal-share]
+type = "concept"
+term = "Unseal share"
+summary = "One of the Shamir shares (threshold 2) of the OpenBao server: 3, or 5 with an OpenBao key file."
+
+[openbao-key-file]
+type = "record"
+term = "OpenBao key file"
+summary = "The DPAPI-protected workstation file with two unseal shares that unseals OpenBao and logs the Operator in."
+
+[custody-share]
+type = "concept"
+term = "Custody share"
+summary = "One of unseal shares 1 to 3, held by the Operator outside every tier; two rebuild the OpenBao key file."
+
+[gate]
+type = "mechanism"
+term = "The gate"
+summary = "The unseal once per server start, then the Operator's login once per sitting."
+
+[sitting]
+type = "concept"
+term = "Sitting"
+summary = "The span between the Operator's OpenBao login and the end of that token."
+
+[secret-name]
+type = "concept"
+term = "Secret name"
+summary = "The path a secret is kept under in OpenBao, as dcf-secret takes it."
+
+[back-identity]
+type = "concept"
+term = "Back identity"
+summary = "The AppRole a back logs in with, loopback only, on its own path, working only while unsealed."
+
+[register-operator-key]
+type = "concept"
+term = "Register operator key"
+summary = "The Operator's key that signs the register's operator acts, kept in OpenBao."
+
+[recovery-key]
+type = "concept"
+term = "Recovery key"
+summary = "The register's second operator key, kept offline outside OpenBao."
+
+[component-registry]
+type = "mechanism"
+term = "Component registry"
+summary = "Agentic components in ordered layers from any sources, one path tree of typed values merged by type; higher layer wins, a lock beats it (ADR-0063)."
+
+[registry-layer]
+type = "mechanism"
+term = "Registry layer"
+summary = "One ordered input of the component registry, made of registry sources; a higher layer wins."
+
+[registry-source]
+type = "mechanism"
+term = "Registry source"
+summary = "A registry-source-<kind> executable that fetches a registry layer into a layer copy."
+
+[layer-copy]
+type = "mechanism"
+term = "Layer copy"
+summary = "The local copy of a registry layer's files; the last good copy is used when the source is unreachable."
+
+[resolved-view]
+type = "mechanism"
+term = "Resolved view"
+summary = "The merged tree dcf-registry resolve writes for who you are, swapped in whole as the view link."
+
+[registry-lock]
+type = "mechanism"
+term = "Registry lock"
+summary = "A lock on a key so it keeps the locking layer's value; it beats @replace."
+
+[who-you-are-path]
+type = "concept"
+term = "Who-you-are path"
+summary = "The path saying which registry sections apply to this person and agent (--as)."
+
+[layer-file]
+type = "concept"
+term = ".layer file"
+summary = "A component registry file of sections of paths with :key value lines."
+
+[built-in-base-layer]
+type = "mechanism"
+term = "Built-in base layer"
+summary = "The rank-0 registry layer the Feature ships, holding the utility skills; every other layer wins over it."
+
+[hand-over]
+type = "mechanism"
+term = "Hand-over"
+summary = "dcf-registry handover: gives the resolved view's skills to a CLI adapter's skills verb under the view lock (ADR-0064)."
+
+[owned-copy]
+type = "concept"
+term = "Owned copy"
+summary = "A skill the registry copied into a CLI's skills folder, marked by .component-registry; only these are replaced or removed."
+
+[registry-path]
+type = "concept"
+term = "registry-path"
+summary = "The agents list key giving one agent its who-you-are path for the start hook."
+
+[agent-definition]
+type = "concept"
+term = "Agent definition"
+summary = "A component registry entry agents/<name> setting an agent's model and skills; the registry wins over the agents list for those two fields, and no identity, lease or permission key can be set."
+
+[layer-namespace]
+type = "concept"
+term = "Layer namespace"
+summary = "A name on a registry layer that prefixes every component it brings; layers sharing a namespace merge with each other, and different namespaces never mix (ADR-0073)."
+
+[explicit-reference]
+type = "concept"
+term = "Explicit reference"
+summary = "A registry reference names its own namespace without a prefix and another with <ns>:, from any layer; nothing names the un-namespaced set from inside a namespace."
+
+[missing-dependency]
+type = "concept"
+term = "Missing dependency"
+summary = "A registry reference whose target is not in the resolved view; reported by resolve, which goes on; the user installs the layer that brings it."
+
+[registry-alias]
+type = "concept"
+term = "Registry alias"
+summary = "aliases on a registry layer: a namespace name in that layer's references mapped to another, one hop."
+
+[own-skills-folder]
+type = "concept"
+term = "Own skills folder"
+summary = "The directory of registry skills one agent alone reads, added to Claude Code with --add-dir; the skills its view does not share with the other agents stay out of the personal folder."
+
+[hand-over-record]
+type = "concept"
+term = "Hand-over record"
+summary = "The record dcf-registry keeps of which agent got which who-you-are path's view and own skills folder; agents no longer listed are forgotten."
+
+[vendor-template]
+type = "concept"
+term = "Vendor template"
+summary = "A minijinja-cli template that renders the resolved view into one kind of vendor file, replacing adapter shell; the merge is unchanged (ADR-0077)."
+
+[[relation]]
+subject = "vendor-template"
+predicate = "reads"
+object = "resolved-view"
+
+[key-mode]
+type = "mechanism"
+term = "Key mode"
+summary = "The ssh-agent Feature's opt-in key volume and key tasks; deprecated, becomes localAgent in 2.0."
+
+[host-agent-mode]
+type = "concept"
+term = "Host agent mode"
+summary = "What the workstation offers the ssh-agent Feature: socket, none or key, passed as DCF_HOST_SSH_AGENT."
+
+[host-audio]
+type = "mechanism"
+term = "Host audio"
+summary = "Opt-in DCF_HOST_AUDIO=wslg: the launcher mounts a relay folder the workstation gates (ADR-0058), so the audio Feature sees the Windows microphone while the gate is on."
+
+[[relation]]
+subject = "launcher"
+predicate = "uses"
+object = "host-audio"
+
+[audio-gate]
+type = "mechanism"
+term = "Audio gate"
+summary = "A workstation relay with a TTL between the container and WSLg's microphone socket; off by default."
+
+[[relation]]
+subject = "audio-gate"
+predicate = "uses"
+object = "host-audio"
+
+[ssh-agent-mode]
+type = "mechanism"
+term = "SSH agent mode"
+summary = "SSH_AGENT_MODE in the workstation's .env, read into the ssh-agent Feature's mode option: auto, socket, key or none."
+
+[central-server]
+type = "place"
+term = "Central server"
+summary = "An owner-run OpenBao server that devcontainers reach in client mode."
+
+[snapshot]
+type = "record"
+term = "Snapshot"
+summary = "The raft file of the whole store, as ciphertext."
+
+[backup]
+type = "record"
+term = "Backup"
+summary = "The Feature's named, never-overwritten copy of a snapshot in a destination."
+
+[workstation-scheduler]
+type = "mechanism"
+term = "Workstation scheduler"
+summary = "The consumer's own scheduler on the workstation running a one-shot task; the launcher never registers it."
+
+[throwaway-init]
+type = "mechanism"
+term = "Throwaway init"
+summary = "The first step of a restore into a fresh server, with shares and a root token that are discarded."
+
+[onboarding-instance]
+type = "concept"
+term = "Onboarding instance"
+summary = "A short-lived second server holding only the shared keys, from which the handover snapshot is taken."
+
+[claim]
+type = "mechanism"
+term = "Claim"
+summary = "openbao:onboard:claim: makes a restored store the receiver's own, with new shares and the sender's access revoked."
+
+[claim-token]
+type = "concept"
+term = "Claim token"
+summary = "The onboarding instance's root token, printed once at export and revoked by the claim, since rotate-keys needs a token."
+
+[response-wrapping]
+type = "mechanism"
+term = "Response wrapping"
+summary = "A one-use wrapping token holding one secret in a central server's cubbyhole."
+
+[keyfile-unlock]
+type = "mechanism"
+term = "Keyfile unlock"
+summary = "The openbao unlock option keyfile: the Operator's OpenBao key file unlocks a server-mode store through openbao-keyfile."
+
+[renewer]
+type = "mechanism"
+term = "Renewer"
+summary = "The Feature's own process under keyfile unlock that renews the operator AppRole token and stops when renewal is refused."
+
+# Relations
+
+[[relation]]
+subject = "host"
+predicate = "is-a"
+object = "inter"
+
+[[relation]]
+subject = "back"
+predicate = "is-a"
+object = "agent"
+
+[[relation]]
+subject = "inter"
+predicate = "is-a"
+object = "agent"
+
+[[relation]]
+subject = "scribe"
+predicate = "is-a"
+object = "back"
+
+[[relation]]
+subject = "secretary"
+predicate = "is-a"
+object = "back"
+
+[[relation]]
+subject = "librarian"
+predicate = "is-a"
+object = "back"
+
+[[relation]]
+subject = "tester"
+predicate = "is-a"
+object = "back"
+
+[[relation]]
+subject = "journalist"
+predicate = "is-a"
+object = "brief"
+
+[[relation]]
+subject = "host"
+predicate = "briefs"
+object = "con"
+
+[[relation]]
+subject = "brief"
+predicate = "contains"
+object = "hand-off"
+
+[[relation]]
+subject = "con"
+predicate = "returns"
+object = "hand-off"
+
+[[relation]]
+subject = "con"
+predicate = "runs"
+object = "worktree"
+
+[[relation]]
+subject = "devhost"
+predicate = "contains"
+object = "host"
+
+[[relation]]
+subject = "devhost"
+predicate = "contains"
+object = "back"
+
+[[relation]]
+subject = "scribe"
+predicate = "writes"
+object = "ledger-entry"
+
+[[relation]]
+subject = "ledger"
+predicate = "contains"
+object = "ledger-entry"
+
+[[relation]]
+subject = "ledger-entry"
+predicate = "contains"
+object = "measures"
+
+[[relation]]
+subject = "ledger-entry"
+predicate = "contains"
+object = "friction"
+
+[[relation]]
+subject = "secretary"
+predicate = "keeps"
+object = "backlog"
+
+[[relation]]
+subject = "secretary"
+predicate = "writes"
+object = "decision"
+
+[[relation]]
+subject = "secretary"
+predicate = "writes"
+object = "amend-item"
+
+[[relation]]
+subject = "backlog"
+predicate = "contains"
+object = "backlog-item"
+
+[[relation]]
+subject = "backlog"
+predicate = "contains"
+object = "decision"
+
+[[relation]]
+subject = "librarian"
+predicate = "keeps"
+object = "lexicon"
+
+[[relation]]
+subject = "librarian"
+predicate = "keeps"
+object = "adr"
+
+[[relation]]
+subject = "journalist"
+predicate = "writes"
+object = "white-paper"
+
+[[relation]]
+subject = "drop-a-seed"
+predicate = "uses"
+object = "journalist"
+
+[[relation]]
+subject = "back"
+predicate = "writes"
+object = "quiet-notice"
+
+[[relation]]
+subject = "hook"
+predicate = "runs"
+object = "back"
+
+[[relation]]
+subject = "hook"
+predicate = "runs"
+object = "briefing"
+
+[[relation]]
+subject = "briefing"
+predicate = "reads"
+object = "ledger"
+
+[[relation]]
+subject = "briefing"
+predicate = "reads"
+object = "backlog"
+
+[[relation]]
+subject = "briefing"
+predicate = "reads"
+object = "cost-report"
+
+[[relation]]
+subject = "host"
+predicate = "runs"
+object = "ledger-review"
+
+[[relation]]
+subject = "ledger-review"
+predicate = "reads"
+object = "cost-report"
+
+[[relation]]
+subject = "ledger-review"
+predicate = "reads"
+object = "ledger"
+
+[[relation]]
+subject = "host"
+predicate = "runs"
+object = "night-shift"
+
+[[relation]]
+subject = "night-shift"
+predicate = "writes"
+object = "night-shift-report"
+
+[[relation]]
+subject = "guard"
+predicate = "checks"
+object = "backlog"
+
+[[relation]]
+subject = "guard"
+predicate = "checks"
+object = "lexicon"
+
+[[relation]]
+subject = "guard"
+predicate = "checks"
+object = "adr"
+
+[[relation]]
+subject = "guards"
+predicate = "checks"
+object = "ledger"
+
+[[relation]]
+subject = "guards"
+predicate = "checks"
+object = "adr"
+
+[[relation]]
+subject = "operator"
+predicate = "decides"
+object = "decision"
+
+[[relation]]
+subject = "operator"
+predicate = "is-a"
+object = "engineer"
+
+[[relation]]
+subject = "name-guard"
+predicate = "checks"
+object = "back"
+
+[[relation]]
+subject = "consuming-repo"
+predicate = "contains"
+object = "devcontainer"
+
+[[relation]]
+subject = "devcontainer"
+predicate = "uses"
+object = "feature"
+
+[[relation]]
+subject = "consuming-repo"
+predicate = "uses"
+object = "feature"
+
+[[relation]]
+subject = "devcontainer"
+predicate = "pulls"
+object = "feature"
+
+[[relation]]
+subject = "feature-registry"
+predicate = "contains"
+object = "feature"
+
+[[relation]]
+subject = "release"
+predicate = "publishes"
+object = "feature"
+
+[[relation]]
+subject = "devhost"
+predicate = "builds"
+object = "feature"
+
+[[relation]]
+subject = "local-feature"
+predicate = "is-a"
+object = "feature"
+
+[[relation]]
+subject = "feature"
+predicate = "contains"
+object = "feature-taskfile"
+
+[[relation]]
+subject = "feature"
+predicate = "keeps"
+object = "feature-state"
+
+[[relation]]
+subject = "engineer"
+predicate = "uses"
+object = "devcontainer"
+
+[ontology]
+type = "record"
+term = "Ontology"
+summary = "The canonical data model: what kinds of thing exist, by base id, and how they relate; docs/model/ontology.toml."
+
+[c4-view]
+type = "record"
+term = "C4 view"
+summary = "A Mermaid diagram of the system at one zoom level (Context, Container), named by ontology ids; docs/model/c4-*.md."
+
+[[relation]]
+subject = "librarian"
+predicate = "keeps"
+object = "ontology"
+
+[[relation]]
+subject = "librarian"
+predicate = "keeps"
+object = "c4-view"
+
+[[relation]]
+subject = "guards"
+predicate = "checks"
+object = "ontology"
+
+[[relation]]
+subject = "agent-place"
+predicate = "contains"
+object = "boundaries"
+
+[[relation]]
+subject = "agent"
+predicate = "uses"
+object = "agent-place"
+
+[[relation]]
+subject = "agent"
+predicate = "uses"
+object = "agent-principles"
+
+[[relation]]
+subject = "agentic-delivery-os"
+predicate = "contains"
+object = "way-of-working"
+
+[[relation]]
+subject = "agentic-delivery-os"
+predicate = "contains"
+object = "devhost"
+
+[[relation]]
+subject = "iteration"
+predicate = "uses"
+object = "way-of-working"
+
+[[relation]]
+subject = "iteration-package"
+predicate = "contains"
+object = "white-paper"
+
+[[relation]]
+subject = "cost-report"
+predicate = "uses"
+object = "cost-store"
+
+[[relation]]
+subject = "shared-language"
+predicate = "contains"
+object = "lexicon"
+
+[[relation]]
+subject = "drop-a-seed"
+predicate = "writes"
+object = "white-paper"
+
+[[relation]]
+subject = "drop-a-seed"
+predicate = "builds"
+object = "iteration-package"
+
+[[relation]]
+subject = "plant-a-seed"
+predicate = "reads"
+object = "iteration-package"
+
+[[relation]]
+subject = "shutdown-check"
+predicate = "checks"
+object = "devhost"
+
+[[relation]]
+subject = "shutdown-and-restart"
+predicate = "uses"
+object = "shutdown-check"
+
+[[relation]]
+subject = "guards"
+predicate = "reads"
+object = "name-exception"
+
+[[relation]]
+subject = "docs-site"
+predicate = "contains"
+object = "backlog"
+
+[[relation]]
+subject = "docs-site"
+predicate = "contains"
+object = "ledger"
+
+[[relation]]
+subject = "non-functional-requirement"
+predicate = "checks"
+object = "feature"
+
+[branch-rule]
+type = "mechanism"
+term = "Branch rule"
+summary = "Every branch is named <type>/<backlog-id>/<n> and names an item in the backlog; enforced by the pre-push hook."
+
+[[relation]]
+subject = "branch-rule"
+predicate = "uses"
+object = "backlog-id"
+
+[workstream-number]
+type = "concept"
+term = "Workstream number"
+summary = "The <n> in a branch name, always present and counted from 1; a parallel stream on the same item takes the next."
+
+[[relation]]
+subject = "branch-rule"
+predicate = "uses"
+object = "workstream-number"
+
+[done]
+type = "concept"
+term = "Done"
+summary = "A backlog item is done when its pull request is merged to main; releasing is a separate step the Operator starts."
+
+[[relation]]
+subject = "done"
+predicate = "uses"
+object = "backlog-item"
+
+[spend-target]
+type = "concept"
+term = "Spend target"
+summary = "The $200 monthly agent spend at list price to measure against; a target to track, not a cap."
+
+[[relation]]
+subject = "spend-target"
+predicate = "uses"
+object = "cost-report"
+
+[git-dirs-mount]
+type = "product"
+term = "Git dirs mount"
+summary = "The one line a consuming repo adds to bind the workstation's .git-dirs at /git-dirs; the git wrapper maps the checkout's pointer onto it."
+
+[[relation]]
+subject = "devcontainer"
+predicate = "uses"
+object = "git-dirs-mount"
+
+[host-type]
+type = "product"
+term = "Host type"
+summary = "The kind of workstation the launcher runs on (windows-docker, windows-wsl-docker, windows-wslc, linux, macos); HOST_TYPE picks it and the launcher exposes it as DCF_HOST_* variables."
+
+[[relation]]
+subject = "devcontainer"
+predicate = "uses"
+object = "host-type"
+
+[host-mount]
+type = "product"
+term = "Host mount"
+summary = "A bind mount the launcher adds to devcontainer up from a per-host-type list, skipped when the repo already mounts the target; HOST_MOUNTS=false turns it off."
+
+[[relation]]
+subject = "devcontainer"
+predicate = "uses"
+object = "host-mount"
+
+[agent-list]
+type = "record"
+term = "Agent list"
+summary = "The file a repository keeps naming its agents (name, CLI, folder, args, kind); .devcontainer/agents.yml unless AGENTS_FILE names another repo-relative path."
+
+[resident-agent]
+type = "concept"
+term = "Resident agent"
+summary = "An agent kind: runs continuously in the background; starting it attaches, starting it first when it is not running."
+
+[on-demand-agent]
+type = "concept"
+term = "On-demand agent"
+summary = "An agent kind: starting it opens a new session; it resumes an earlier one only when asked."
+
+[[relation]]
+subject = "agent-list"
+predicate = "contains"
+object = "resident-agent"
+
+[[relation]]
+subject = "agent-list"
+predicate = "contains"
+object = "on-demand-agent"
+
+[[relation]]
+subject = "resident-agent"
+predicate = "is-a"
+object = "agent"
+
+[[relation]]
+subject = "on-demand-agent"
+predicate = "is-a"
+object = "agent"
+
+[handle]
+type = "concept"
+term = "Handle"
+summary = "An agent's name in the agent list: an address, not an identity; path-safe, unique, and the name of its lease folder."
+
+[stateful-agent]
+type = "concept"
+term = "Stateful agent"
+summary = "An agent with lifecycle stateful (the default): has an identity, takes a lease so one copy runs, keeps state in records."
+
+[ephemeral-agent]
+type = "concept"
+term = "Ephemeral agent"
+summary = "An agent with lifecycle ephemeral: no lease, any number of copies, nothing kept or resumed; never resident."
+
+[lease]
+type = "mechanism"
+term = "Lease"
+summary = "The exclusive right to run one copy of a stateful handle: a mkdir-taken folder with a holder file, scope container or none, taken over when the holder is dead."
+
+[carrier]
+type = "concept"
+term = "Carrier"
+summary = "What an agent currently runs on (session, process or none): a runtime fact, never assumed to be the agent."
+
+[session-name]
+type = "concept"
+term = "Session name"
+summary = "The label a CLI shows for an agent's session, rendered once per start by the agents Feature from the sessionName template and passed to the CLI adapter in AGENT_SESSION_NAME; stable for a stateful agent."
+
+[[relation]]
+subject = "cli-adapter"
+predicate = "uses"
+object = "session-name"
+
+[agent-integration]
+type = "mechanism"
+term = "Agent integration"
+summary = "An agent-integration-<id> executable supplied by a framework that acts on an agent's lifecycle through verbs and key=value arguments, never reading the agent list."
+
+[[relation]]
+subject = "agent-list"
+predicate = "contains"
+object = "handle"
+
+[[relation]]
+subject = "stateful-agent"
+predicate = "is-a"
+object = "agent"
+
+[[relation]]
+subject = "ephemeral-agent"
+predicate = "is-a"
+object = "agent"
+
+[[relation]]
+subject = "stateful-agent"
+predicate = "uses"
+object = "lease"
+
+[[relation]]
+subject = "stateful-agent"
+predicate = "uses"
+object = "agent-integration"
+
+[cli-adapter]
+type = "mechanism"
+term = "CLI adapter"
+summary = "An agent-adapter-<cli> executable installed by a CLI Feature that the agents Feature calls to start, wake, open or list that CLI's sessions; chosen by cli:, the only use of the word adapter."
+
+[augmentation]
+type = "concept"
+term = "Augmentation"
+summary = "A Feature with the same id as a tool an official Feature or the base image installs, ordered after it with installsAfter, adding persistent state, a wrapper, a Taskfile or a setup script."
+
+[wrapper]
+type = "mechanism"
+term = "Wrapper"
+summary = "An executable a Feature installs ahead of a tool on PATH under the tool's own name to adjust its behaviour (git, claude)."
+
+[local-workaround]
+type = "concept"
+term = "Local workaround"
+summary = "A consuming repository's own script around a gap in this collection; each one found is a backlog item here."
+
+[launcher]
+type = "mechanism"
+term = "Launcher"
+summary = "The host-side bootstrap and task set (task devcontainer:*) that runs devcontainer up and sets DCF_HOST_*; host side only."
+
+[shared-script]
+type = "product"
+term = "Shared script"
+summary = "A script in src/common vendored verbatim into the Features that use it (dcf-persist, dcf-curl)."
+
+[component]
+type = "product"
+term = "Component"
+summary = "Shared code in components/<id> with no devcontainer-feature.json, synced into each Feature that uses it and checked for drift."
+
+[participant-component]
+type = "product"
+term = "Participant component"
+summary = "The component holding the former agents Feature's code; claude-code installs it with participants: true."
+
+[facilitator]
+type = "product"
+term = "Facilitator"
+summary = "The Feature that runs the Directory and SLIM node on loopback and routes @handle messages between named agents, keeping the conversation as a signed record."
+
+[facilitator-node]
+type = "product"
+term = "Facilitator node"
+summary = "One install of the facilitator on the network, with a role and peers or a primary; topology is configuration; it signs for its own agents."
+
+[mesh]
+type = "product"
+term = "Mesh"
+summary = "The facilitator nodes that trust each other; each node has its own mesh.yml with SPIFFE trust domains and a preset."
+
+[trust-level]
+type = "mechanism"
+term = "Trust level"
+summary = "How far a facilitator node trusts a client or peer: local, private or public; MCP over HTTP clients are public by default."
+
+[node-bundle]
+type = "product"
+term = "Node bundle"
+summary = "The built, checksummed package of one facilitator release and architecture, with its own Python, dirctl and slimctl; the Feature and the server image install from it."
+
+[thin-client]
+type = "product"
+term = "Thin client"
+summary = "The stdio MCP server facilitator mcp: it starts no daemon and talks only to a node."
+
+[join-token]
+type = "mechanism"
+term = "Join token"
+summary = "A single-use, 15-minute token a person makes so that a node or leaf client can join a private trust domain."
+
+[facilitator-mode]
+type = "mechanism"
+term = "Facilitator mode"
+summary = "The Feature option mode: node or leaf; leaf installs only the bundle and the thin client and signs with its own key."
+
+[deprecation]
+type = "mechanism"
+term = "Deprecation"
+summary = "A Feature or option is announced as deprecated in a minor release with behaviour unchanged and removed only in the next major."
+
+[devcontainer-hook]
+type = "mechanism"
+term = "Devcontainer hook"
+summary = "A postCreateCommand, postStartCommand or postAttachCommand of the Dev Container spec."
+
+[setup-script]
+type = "mechanism"
+term = "Setup script"
+summary = "A Feature's <id>-setup executable, called from its post-create devcontainer hook."
+
+[git-hook]
+type = "mechanism"
+term = "Git hook"
+summary = "A script git runs at a step of its own: pre-commit, pre-push, prepare-commit-msg."
+
+[publish-target]
+type = "place"
+term = "Publish target"
+summary = "Where the repository's site is published (Claude artifacts today)."
+
+[[relation]]
+subject = "augmentation"
+predicate = "uses"
+object = "wrapper"
+
+[[relation]]
+subject = "augmentation"
+predicate = "uses"
+object = "setup-script"
+
+[[relation]]
+subject = "setup-script"
+predicate = "uses"
+object = "shared-script"
+
+[[relation]]
+subject = "setup-script"
+predicate = "runs"
+object = "devcontainer-hook"
+
+[[relation]]
+subject = "participant-component"
+predicate = "is-a"
+object = "component"
+
+[[relation]]
+subject = "launcher"
+predicate = "uses"
+object = "host-type"
+
+[[relation]]
+subject = "stateful-agent"
+predicate = "uses"
+object = "cli-adapter"
+
+[node-role]
+type = "mechanism"
+term = "Node role"
+summary = "What a facilitator node is in a mesh, set in mesh.yml: standalone (default), spoke, hub or peer."
+
+[two-locks]
+type = "mechanism"
+term = "Two locks"
+summary = "One SLIM listener per trust level with its own CA bundle, plus the facilitator's check of every signed packet's SPIFFE ID against mesh.yml."
+
+[node-card]
+type = "mechanism"
+term = "Node card"
+summary = "The document a node signs with its certificate key, holding its certificate, facilitator key and exposed participants' keys; lock two reads it."
+
+[peers-part]
+type = "mechanism"
+term = "Peers part"
+summary = "The fourth part of a node's infrastructure: gets the certificate, sends the hello to the hub, exchanges cards and rosters."
+
+[join-endpoint]
+type = "mechanism"
+term = "Join endpoint"
+summary = "The HTTPS port a hub opens only while a join token is live, so a spoke without a certificate can join."
+
+[qualified-handle]
+type = "concept"
+term = "Qualified handle"
+summary = "handle.node, naming one agent when nodes share a handle; a bare handle works only when it is unique."
+
+[shared-handle]
+type = "concept"
+term = "Shared handle"
+summary = "A handle announced by agents on two or more nodes of a mesh, reached by qualified handle."
+
+[http-client]
+type = "mechanism"
+term = "HTTP client"
+summary = "A CLI reaching a facilitator node over MCP over HTTP with a bearer token; signed for by the node, never a person."
+
+[bearer-token]
+type = "mechanism"
+term = "Bearer token"
+summary = "The <client>.<secret> token a person makes for an HTTP client; the node keeps only its SHA-256."
+
+[first-contact-approval]
+type = "mechanism"
+term = "First-contact approval"
+summary = "At the public level an HTTP client's first message is held until a person approves the client."
+
+[via]
+type = "mechanism"
+term = "Via"
+summary = "The data.via field naming the HTTP client the node vouches for on a message it signed."
+
+[node-issuer]
+type = "mechanism"
+term = "Node issuer"
+summary = "What signs a domain's node certificates: the node itself by default, with the CA key in OpenBao, else an ssh-agent, else a file."
+
+[peer-node]
+type = "mechanism"
+term = "Peer node"
+summary = "A node with role peer: its own trust domain and CA, paired with other peers by invite and token."
+
+[public-domain]
+type = "mechanism"
+term = "Public domain"
+summary = "A second trust domain a node opens with its own join endpoint, listener and CA bundle; shows only public agents."
+
+[join-request]
+type = "mechanism"
+term = "Join request"
+summary = "A public node's ask to join, held until a person approves or denies it."
+
+[addressed-copy]
+type = "mechanism"
+term = "Addressed copy"
+summary = "Replication rule kept at conversation level: a public node gets only conversations it is a member of."
+
+[mesh-secret-rotation]
+type = "mechanism"
+term = "Mesh secret rotation"
+summary = "Replacing the mesh's SLIM shared secret after a revoke, handed to the remaining nodes under the old one."
+
+[audit-register]
+type = "mechanism"
+term = "Audit register"
+summary = "The signed register of type audit holding enrolment, join, approve, revoke and rotate events."
+
+[built-in-ca]
+type = "mechanism"
+term = "Built-in CA"
+summary = "A hub's own root and issuing CA, used when no OpenBao PKI is configured; needs no unseal."
+
+[export-root]
+type = "mechanism"
+term = "Export root"
+summary = "The person's command that writes the built-in CA's root key out and removes it from the volume."
+
+[issuer-migrate]
+type = "mechanism"
+term = "Issuer migrate"
+summary = "The person's command that moves a built-in hub's issuing CA into an OpenBao PKI without spokes re-joining."
+
+[issuer-tier]
+type = "mechanism"
+term = "Issuer tier"
+summary = "One of the places a node's CA key lives, tried in order: OpenBao, ssh-agent, file."
+
+[agent-tier]
+type = "mechanism"
+term = "Agent tier"
+summary = "The issuer tier that keeps the CA key in an ssh-agent, an ed25519 key matched by fingerprint."
+
+[oauth-client]
+type = "mechanism"
+term = "OAuth client"
+summary = "A cloud AI's caller, identified by issuer plus subject and mapped like a bearer client under first-contact approval."
+
+[resource-server]
+type = "mechanism"
+term = "Resource server"
+summary = "What the node is to OAuth: it validates JWT access tokens from allowed issuers and hosts no authorization server."
+
+[authorization-server]
+type = "mechanism"
+term = "Authorization server"
+summary = "The named issuer entry in http.issuers that signs the access tokens a node accepts."
+
+[protected-resource-metadata]
+type = "mechanism"
+term = "Protected-resource metadata"
+summary = "The RFC 9728 document naming the node's resource URL and authorization servers, pointed to by the 401 challenge."

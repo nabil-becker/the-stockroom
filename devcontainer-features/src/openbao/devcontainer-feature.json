@@ -1,0 +1,75 @@
+{
+  "id": "openbao",
+  "version": "1.6.0",
+  "name": "OpenBao CLI",
+  "description": "Installs the OpenBao CLI (https://openbao.org), the open-source Vault fork, as a release binary at /usr/local/bin/bao, verified against the release's checksums.txt. Owns the login state as a named volume at OPENBAO_STATE_DIR=/var/lib/devcontainer-features/openbao (bao's token helper, set through BAO_CONFIG_PATH, keeps the token in it) so `bao login` survives rebuilds, with the post-create hook openbao-setup, and installs dcf-secret, the one command the collection's Features use to read and write secrets (get, put, status, with fixed exit codes). Mode client (the default) is the CLI against a server of yours (set BAO_ADDR in containerEnv). Mode server also runs a server inside the container, started at post-start with raft storage on the same volume and sealed until the Operator unseals it: tasks openbao:init (unseal shares printed only to a terminal, a backup choice asked for), openbao:unseal, openbao:seal, userpass login for the Operator, loopback-bound AppRole roles (openbao:approle:issue) and openbao:server:status. Backup and restore (openbao:backup to a folder you name, on a timer if you set one, and openbao:restore from a snapshot). SSH key records in OpenBao (openbao:ssh:new, put, retire, age) and the import of keys kept elsewhere (openbao:ssh:import FROM=file, ssh-agent or agentic-register), which ssh-agent's key:load and key:rotate use. Onboarding: openbao:onboard:export and :onboard:claim (a starter instance restored, then rotate-keys and every access the sender held revoked) and openbao:wrap and :unwrap (one-use response-wrapping tokens for a few keys against a central server). An SSH certificate authority whose private key lives in OpenBao and never leaves it (openbao:ssh:ca:init, :ca:role for more signing roles, :ca:import for one key across instances) and dcf-ssh-sign, the one command a caller uses to get a user certificate signed (sign, ca, ca --fingerprint, roles, status; the Operator only). Option unlock: keyfile opens a server-mode store with the OpenBao key file the Windows launcher keeps (no typed share or password; opt-in).",
+  "documentationURL": "https://github.com/nabil-becker/devcontainer-features/tree/main/src/openbao",
+  "licenseURL": "https://github.com/nabil-becker/devcontainer-features/blob/main/LICENSE",
+  "options": {
+    "installTaskfile": {
+      "type": "boolean",
+      "default": true,
+      "description": "Also install this Feature's Taskfile into /usr/local/share/go-task/includes.d so its tasks appear under the <id>: namespace of a root Taskfile that includes /usr/local/share/go-task/features.yml (see the go-task Feature)."
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "client",
+        "server"
+      ],
+      "default": "client",
+      "description": "How the Feature is used. 'client' (default): the bao CLI and dcf-secret against a server outside the container (BAO_ADDR). 'server': also run a server in the container (raft storage on the Feature's volume, loopback only, started at post-start, sealed until `task openbao:unseal`; needs OpenBao 2.4.0 or newer). Override per container with OPENBAO_SETUP_MODE in containerEnv."
+    },
+    "unlock": {
+      "type": "string",
+      "enum": [
+        "operator",
+        "keyfile"
+      ],
+      "default": "operator",
+      "description": "Server mode: how the store is opened. 'operator' (default): the Operator types two unseal shares after every server start (task openbao:unseal) and logs in with a password. 'keyfile': the OpenBao key file on the workstation (Windows launcher, task dc:openbao:keyfile:create once) unseals the server and logs the Operator in at every task dc:* with nothing typed: 5 unseal shares (3 custody shares kept by the Operator, 2 in the key file), an operator AppRole with a 1-hour periodic token renewed in the container, no password. Override per container with OPENBAO_SETUP_UNLOCK in containerEnv."
+    },
+    "backupDest": {
+      "type": "string",
+      "default": "",
+      "description": "Server mode: the folder (an absolute path inside the container, e.g. a bind-mounted cloud folder or a USB disk) that `task openbao:backup` and the backup timer write to when no DEST is given. Empty (the default): no default destination, so nothing is backed up unless you run `task openbao:backup DEST=<folder>`; `task openbao:init` also records a destination. Override per container with OPENBAO_SETUP_BACKUP_DEST."
+    },
+    "backupKeep": {
+      "type": "string",
+      "default": "30",
+      "description": "Server mode: how many backups of this machine to keep in the destination (the newest N); older ones named openbao-<machine>-<UTC time>.snap are removed after each backup, nothing else ever is. 0 keeps every backup. Every backup holds every secret (encrypted; the unseal shares open it), so they should not pile up. Override with OPENBAO_SETUP_BACKUP_KEEP."
+    },
+    "backupInterval": {
+      "type": "string",
+      "default": "",
+      "description": "Server mode: run a backup into the default destination every so often (5m, 6h, 1d; at least 5 minutes) from a timer the start hook starts inside the container. Empty (the default): off; backups are then yours to run, or to schedule from the host with its own scheduler (see the NOTES). A sealed server is skipped until the next tick. Override with OPENBAO_SETUP_BACKUP_INTERVAL."
+    },
+    "backupWarnAfter": {
+      "type": "string",
+      "default": "7d",
+      "description": "Server mode: `task openbao:server:status` warns when the last backup is older than this (30m, 12h, 7d). Override with OPENBAO_SETUP_BACKUP_WARN_AFTER."
+    },
+    "version": {
+      "type": "string",
+      "default": "latest",
+      "description": "OpenBao release to install (e.g. '2.7.1', with or without a leading 'v'), or 'latest'. Match your OpenBao server's version."
+    }
+  },
+  "containerEnv": {
+    "OPENBAO_STATE_DIR": "/var/lib/devcontainer-features/openbao",
+    "BAO_CONFIG_PATH": "/usr/local/share/openbao-feature/bao-config.hcl"
+  },
+  "mounts": [
+    {
+      "source": "openbao-config-${devcontainerId}",
+      "target": "/var/lib/devcontainer-features/openbao",
+      "type": "volume"
+    }
+  ],
+  "postCreateCommand": "openbao-setup",
+  "postStartCommand": "openbao-setup start",
+  "installsAfter": [
+    "ghcr.io/nabil-becker/devcontainer-features/go-task",
+    "ghcr.io/devcontainers/features/common-utils"
+  ]
+}

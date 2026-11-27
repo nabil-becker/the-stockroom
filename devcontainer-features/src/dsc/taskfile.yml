@@ -1,0 +1,41 @@
+# Tasks contributed by the dsc Feature (namespace: dsc). CONFIG is the path
+# to a DSC v3 configuration document (YAML or JSON), relative to where you run
+# task.
+version: '3'
+
+tasks:
+  version:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Show the installed DSC version.'
+    cmds:
+      - dsc --version
+
+  resources:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'List the DSC resources discoverable in this container (bundled ones live in /opt/dsc).'
+    cmds:
+      - dsc resource list {{.CLI_ARGS}}
+
+  get:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Read the current state described by CONFIG=<file> without changing anything.'
+    requires:
+      vars: [CONFIG]
+    cmds:
+      - dsc config get --file '{{.CONFIG}}' {{.CLI_ARGS}}
+
+  test:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Report whether the system matches CONFIG=<file> (inDesiredState per resource); changes nothing.'
+    requires:
+      vars: [CONFIG]
+    cmds:
+      - dsc config test --file '{{.CONFIG}}' {{.CLI_ARGS}}
+
+  set:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Converge the system to CONFIG=<file>. Changes state - review `task dsc:test` output first.'
+    requires:
+      vars: [CONFIG]
+    cmds:
+      - dsc config set --file '{{.CONFIG}}' {{.CLI_ARGS}}

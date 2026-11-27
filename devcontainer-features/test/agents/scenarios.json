@@ -1,0 +1,43 @@
+{
+  "with_task": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "go-task": {},
+      "agents": {}
+    },
+    "remoteUser": "vscode"
+  },
+  "with_claude_code": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "claude-code": {
+        "install": "none"
+      },
+      "agents": {}
+    },
+    "remoteUser": "vscode"
+  },
+  "no_taskfile": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "agents": {
+        "installTaskfile": false
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "with_claude_code_participants": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "go-task": {},
+      "claude-code": {
+        "install": "none",
+        "participants": true
+      },
+      "agents": {
+        "sessionName": "{machine} {handle}"
+      }
+    },
+    "remoteUser": "vscode"
+  }
+}

@@ -1,0 +1,3043 @@
+<#
+.SYNOPSIS
+    Drives @devcontainers/cli against a workspace without installing Node.js
+    or the CLI system-wide. Backs the devcontainer:* tasks in
+    ../devcontainer.yml.
+
+.DESCRIPTION
+    On Windows: downloads a pinned, sha256-verified portable Node.js build
+    once into %LOCALAPPDATA%\devcontainer-features\devcontainer-node, installs
+    @devcontainers/cli next to it with that Node's npm, and runs the CLI's
+    devcontainer.js entrypoint via node.exe directly (not npx.cmd - that is a
+    cmd.exe batch shim, and cmd.exe's argument re-parsing silently eats
+    backslashes).
+
+    On Linux/macOS: uses `devcontainer` if it is on PATH (e.g. installed by
+    the devcontainer-cli Feature), else `npx -y @devcontainers/cli`.
+
+    Container engine: any docker-compatible CLI, passed to the devcontainer
+    CLI as --docker-path. Chosen by DEVCONTAINER_DOCKER_PATH (a name on PATH
+    such as docker, wslc, podman, nerdctl, finch - or a full path); when
+    unset, `docker` on PATH is used, else wslc.exe (WSL Containers, WSL >=
+    2.9.3) on Windows.
+
+    Host type: HOST_TYPE (default auto) names the kind of host - windows-docker,
+    windows-wsl-docker, windows-wslc, linux, macos - and HOST_TYPE_PRIORITY
+    (ordered comma list) says which `auto` tries first. The engine follows the
+    host type unless DEVCONTAINER_DOCKER_PATH is set, which always wins. Before
+    the CLI runs, DCF_HOST_TYPE, DCF_HOST_HOME, DCF_HOST_SSH_AGENT and DCF_HOST_CLOUD_FOLDER are
+    set in this process (see Resolve-HostProfile; `host` prints them).
+
+    Every setting here is read from an environment variable so a .env file
+    (loaded by Task's dotenv: or by bootstrap.ps1) can drive it:
+      DEVCONTAINER_DOCKER_PATH, DEVCONTAINER_NODE_VERSION,
+      DEVCONTAINER_CLI_VERSION, HOST_TYPE, HOST_TYPE_PRIORITY, HOST_MOUNTS, SSH_AGENT_MODE,
+      DCF_HOST_CLOUD_FOLDER, DCF_HOST_FUSE, DCF_HOST_AUDIO, DEVCONTAINER_ENGINE_WAIT. Explicit parameters win over the environment.
+
+    DCF_HOST_MACHINE is always the launcher's own value: the workstation's machine name
+    ($env:COMPUTERNAME on Windows, else the host name before its first dot), cut to letters, digits,
+    dot, underscore and hyphen (at most 63 characters). `up` and `host` warn once when the
+    repository's devcontainer.json does not read it with ${localEnv:DCF_HOST_MACHINE}.
+
+    FUSE on request (cloud-folder Feature, mount mode; ADR 0031): DCF_HOST_FUSE=1 (or true, yes,
+    on) sets DCF_HOST_FUSE_DEVICE, DCF_HOST_FUSE_CAP and DCF_HOST_FUSE_SECURITY to
+    --device=/dev/fuse, --cap-add=SYS_ADMIN and --security-opt=apparmor=unconfined for the CLI,
+    which the repository's runArgs read with ${localEnv:<name>:<default>} (the CLI has no option
+    for run arguments; the bootstrap's devcontainer.json carries the lines). Unset, the three are
+    removed. Never granted by default; `up` warns when the repository's devcontainer.json lacks
+    the lines (Get-FuseSlotMissing). Not granted on windows-wslc (or an engine named wslc): wslc
+    run has no --device, --cap-add or --security-opt option and would refuse the start, so `up`
+    warns once and starts the container without FUSE (Get-FuseRefusal, Write-FuseRefusedWarning).
+
+    Audio on request, gated on the workstation (the audio Feature, ADR 0057): DCF_HOST_AUDIO=wslg on
+    windows-docker or windows-wsl-docker makes `up` create the relay directory /mnt/wsl/devhost-audio
+    in the default WSL distro (as root) and mount it, empty, at /mnt/wslg, and sets
+    DCF_HOST_AUDIO=wslg; otherwise none, with one warning when asked for. Unset or none runs nothing
+    (Initialize-HostAudio). The microphone is OFF until `audio on [<duration>]` (task audio:on) starts
+    a socat relay in that directory from the default distro's /mnt/wslg/PulseServer, ended by the
+    duration (DCF_HOST_AUDIO_TTL, default 15m; at most DCF_HOST_AUDIO_TTL_MAX, default 2h) or by
+    `audio off`; `audio status` says whether it is on and the time left (Invoke-HostAudio).
+
+    Host mounts: `up` (so `rebuild`) adds the mounts the host type needs with
+    `--mount type=bind,source=...,target=...` (Get-HostMount; slice 3: the
+    `.git-dirs` folder of the host home at /git-dirs; slice 4: the SSH agent socket at
+    /var/lib/devcontainer-features/ssh-agent/agent.sock where the host type has one),
+    so a repository declares none. DCF_HOST_SSH_AGENT is socket, none or key
+    (SSH_AGENT_MODE=key, the opt-in to a key in the container, also suppresses the mount). The
+    host folder DCF_HOST_CLOUD_FOLDER, when set, goes to the cloud-folder Feature's fixed host mount
+    /mnt/cloud-folder-host (the Feature links its mountPoint there); it is never created, and
+    skipped with a warning when it does not exist on this host. A mount whose target the repository's devcontainer.json already mounts is
+    skipped, with one line saying so. HOST_MOUNTS=false turns the launcher's mounts
+    off. `build` mounts nothing and `exec` runs in an existing container: neither
+    takes them.
+
+    Image builds are serialised host-wide: `up` and `build` hold the named
+    mutex Global\devcontainer-features-build while they run (see
+    Enter-DevcontainerBuildLock), and a waiter's line names the holder's repository,
+    subcommand and start time and how many others wait. An engine with BuildKit
+    build contexts (buildx 0.8.0 or later, never wslc) skips the lock with one line.
+    DEVCONTAINER_BUILD_LOCK=0 turns it off, =1 keeps it on every engine.
+
+    Engine wait: up, build, exec, set-up and run-user-commands first check that the
+    engine answers (one check when it does) and otherwise wait for it, printing
+    "waiting for the container engine to answer..." once, for DEVCONTAINER_ENGINE_WAIT
+    seconds (default 60; 0 = no wait), then fail naming the engine and how to start it.
+    A failed up or build asks the engine once more and prints its own error (see
+    Wait-ContainerEngine, Write-ContainerEngineDiagnosis).
+
+    The OpenBao key file (the openbao Feature's unlock: keyfile; Windows only, DPAPI): after every
+    successful `up` the launcher asks /usr/local/bin/openbao-setup unlock --status through the
+    engine's `exec -i -u <remote user>` and, when the server is sealed or the token is not live,
+    streams this server's key file from %LOCALAPPDATA%\devcontainer-features-keys\openbao into
+    `unlock --stdin`, one line of output; silent otherwise. The subcommands openbao-unlock and
+    openbao-keyfile back the devcontainer:openbao:* tasks (see "the OpenBao key file" below).
+#>
+
+$script:CacheRoot = if ($IsWindows) { Join-Path $env:LOCALAPPDATA 'devcontainer-features\devcontainer-node' } else { $null }
+$script:DefaultNodeVersion = '24.21.0'
+$script:BuildLockName = 'Global\devcontainer-features-build'
+# The holder file Enter-DevcontainerBuildLock wrote, for Exit-DevcontainerBuildLock to remove.
+$script:BuildLockHolderFile = $null
+# The subcommands that build an image. `up` also covers `rebuild` (up
+# --remove-existing-container). `run-user-commands`, `set-up` and `exec` work on a
+# container that exists, so they take no lock.
+$script:BuildSubcommands = @('up', 'build')
+# The subcommands that talk to the container engine, so wait for it to answer first
+# (Wait-ContainerEngine). read-configuration and upgrade take --docker-path but read files only.
+$script:EngineSubcommands = @('up', 'build', 'exec', 'set-up', 'run-user-commands')
+
+function Get-SettingOrEnv {
+    <# .SYNOPSIS Explicit value if non-empty, else the environment variable, else the default. #>
+    [CmdletBinding()]
+    param([string]$Value, [string]$EnvName, [string]$Default = '')
+    if ($Value) { return $Value }
+    $fromEnv = [Environment]::GetEnvironmentVariable($EnvName)
+    if ($fromEnv) { return $fromEnv }
+    return $Default
+}
+
+function ConvertFrom-TaskCliArgString {
+    <#
+    .SYNOPSIS
+        Decodes the CLI_ARGS a Taskfile task passes as
+        -CliArgsB64 '{{.CLI_ARGS | splitArgs | toJson | b64enc}}' back into
+        an argument array. Passing {{.CLI_ARGS}} straight to `pwsh -File`
+        lets PowerShell's parameter binder see them first (`-w` becomes
+        ambiguous, `--remove-existing-container` is rejected), so Task splits
+        them shell-style and encodes them as one opaque string.
+    #>
+    [CmdletBinding()]
+    param([string]$CliArgsB64)
+
+    if (-not $CliArgsB64) { return , @() }
+    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($CliArgsB64))
+    # No CLI_ARGS encodes as JSON null; drop it rather than pass "".
+    return , [string[]]@($json | ConvertFrom-Json | Where-Object { $null -ne $_ -and $_ -ne '' })
+}
+
+function Invoke-DcfDownload {
+    # Invoke-WebRequest's own -MaximumRetryCount retries only HTTP statuses (408, 429, 5xx), never a reset
+    # connection or a cut transfer, so retry on any exception: 4 attempts in all, a pause between them, a
+    # partial -OutFile removed before each retry, the last error rethrown. Returns the response without -OutFile.
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Uri, [string]$OutFile, [int]$RetryIntervalSec = 2)
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            if ($OutFile) { Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $OutFile }
+            else { return Invoke-WebRequest -UseBasicParsing -Uri $Uri }
+            return
+        }
+        catch {
+            if ($OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+            if ($attempt -ge 4) { throw }
+            Start-Sleep -Seconds $RetryIntervalSec
+        }
+    }
+}
+
+function Get-PortableNodeDir {
+    [CmdletBinding()]
+    param([string]$Version)
+    $Version = Get-SettingOrEnv $Version 'DEVCONTAINER_NODE_VERSION' $script:DefaultNodeVersion
+
+    $nodeDir = Join-Path $script:CacheRoot "node-v$Version-win-x64"
+    $nodeExe = Join-Path $nodeDir 'node.exe'
+    if (Test-Path $nodeExe) { return $nodeDir }
+
+    Write-Host "Downloading portable Node.js v$Version (one-time; cached under $script:CacheRoot)..."
+    New-Item -ItemType Directory -Path $script:CacheRoot -Force | Out-Null
+    $zipName = "node-v$Version-win-x64.zip"
+    $zipPath = Join-Path $script:CacheRoot $zipName
+    try {
+        Invoke-DcfDownload -Uri "https://nodejs.org/dist/v$Version/$zipName" -OutFile $zipPath
+        $sums = (Invoke-DcfDownload -Uri "https://nodejs.org/dist/v$Version/SHASUMS256.txt").Content
+        $line = $sums -split "`n" | Where-Object { $_ -match ('\s' + [regex]::Escape($zipName) + '\s*$') } | Select-Object -First 1
+        if (-not $line) { throw "Could not find $zipName in nodejs.org SHASUMS256.txt for v$Version." }
+        $expected = ($line.Trim() -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) { throw "SHA-256 mismatch for $zipName (expected $expected, got $actual)." }
+        Expand-Archive -Path $zipPath -DestinationPath $script:CacheRoot -Force
+    }
+    finally {
+        Remove-Item -Path $zipPath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not (Test-Path $nodeExe)) { throw "Portable Node.js extraction failed - expected $nodeExe to exist." }
+    return $nodeDir
+}
+
+function Get-DevcontainersCliEntrypoint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$NodeDir,
+        [string]$CliVersion
+    )
+    $CliVersion = Get-SettingOrEnv $CliVersion 'DEVCONTAINER_CLI_VERSION' 'latest'
+
+    $cliDir = Join-Path $script:CacheRoot 'devcontainers-cli'
+    $pkgDir = Join-Path $cliDir 'node_modules\@devcontainers\cli'
+    $entrypoint = Join-Path $pkgDir 'devcontainer.js'
+
+    if (Test-Path $entrypoint) {
+        if ($CliVersion -eq 'latest') { return $entrypoint }
+        $installed = (Get-Content (Join-Path $pkgDir 'package.json') -Raw | ConvertFrom-Json).version
+        if ($installed -eq $CliVersion) { return $entrypoint }
+        Write-Host "Cached @devcontainers/cli is $installed; replacing with $CliVersion..."
+    }
+    else {
+        Write-Host "Installing @devcontainers/cli@$CliVersion (one-time; cached at $cliDir)..."
+    }
+
+    New-Item -ItemType Directory -Path $cliDir -Force | Out-Null
+    $pkg = if ($CliVersion -eq 'latest') { '@devcontainers/cli' } else { "@devcontainers/cli@$CliVersion" }
+    # npm-cli.js via node.exe, for the same cmd.exe-shim reason as the CLI itself.
+    # Out-Host: anything npm prints to stdout would otherwise become part of
+    # this function's return value alongside $entrypoint.
+    $npmCli = Join-Path $NodeDir 'node_modules\npm\bin\npm-cli.js'
+    & (Join-Path $NodeDir 'node.exe') $npmCli install $pkg --no-save --no-audit --no-fund --loglevel=error --prefix $cliDir | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "npm install $pkg failed with exit code $LASTEXITCODE." }
+    if (-not (Test-Path $entrypoint)) { throw "@devcontainers/cli install failed - expected $entrypoint to exist." }
+    return $entrypoint
+}
+
+function Remove-DevcontainersCli {
+    <# .SYNOPSIS Drops the cached @devcontainers/cli so the next call reinstalls it. #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+    $cliDir = Join-Path $script:CacheRoot 'devcontainers-cli'
+    if ((Test-Path $cliDir) -and $PSCmdlet.ShouldProcess($cliDir, 'Remove cached @devcontainers/cli')) {
+        Write-Host "Removing cached @devcontainers/cli at $cliDir..."
+        Remove-Item -Path $cliDir -Recurse -Force
+    }
+}
+
+function Resolve-DockerPath {
+    <#
+    .SYNOPSIS
+        Resolves the docker-compatible CLI to hand to `devcontainer
+        --docker-path`. Returns $null when the devcontainer CLI's own default
+        (`docker` on PATH) should be used.
+
+    .PARAMETER DockerPath
+        A command name on PATH (docker, wslc, podman, nerdctl, finch, ...) or
+        a full path. Falls back to $env:DEVCONTAINER_DOCKER_PATH, then to
+        auto-detection: docker on PATH, else wslc.exe on Windows.
+    #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+
+    $wslcFallback = 'C:\Program Files\WSL\wslc.exe'
+    $spec = Get-SettingOrEnv $DockerPath 'DEVCONTAINER_DOCKER_PATH'
+
+    if ($spec) {
+        if ($spec -eq 'docker') { return $null }
+        if (Test-Path -LiteralPath $spec -PathType Leaf) { return (Resolve-Path -LiteralPath $spec).Path }
+        $cmd = Get-Command $spec -ErrorAction SilentlyContinue
+        if ($cmd) { return $cmd.Source }
+        if ($IsWindows -and $spec -in 'wslc', 'wslc.exe' -and (Test-Path $wslcFallback)) { return $wslcFallback }
+        throw "DEVCONTAINER_DOCKER_PATH / -DockerPath '$spec' is neither a file nor a command on PATH."
+    }
+
+    # No explicit command: the engine follows the host type (HOST_TYPE, see Resolve-HostType).
+    return (Resolve-EngineForHostType -Type (Get-CachedHostType).Type)
+}
+
+# ------------------------------------------------------------ host type ----
+# HOST_TYPE says what kind of host the launcher runs on (docs/proposals/host-profile.md,
+# ADR 0024). The bash twin (src/devcontainer-cli/devcontainer-cli.sh) does the same;
+# keep the two in step (test/bootstrap/host_type_test.sh and DevcontainerCli.Tests.ps1).
+$script:HostTypeIds = @('windows-docker', 'windows-wsl-docker', 'windows-wslc', 'linux', 'macos')
+$script:HostProfileCache = @{}
+
+function Clear-HostProfileCache { <# .SYNOPSIS Forgets the resolved host profile and the audio decision (tests; both live one launcher run). #> $script:HostProfileCache = @{}; $script:HostAudio = $null }
+
+# --- evidence, one small function each so a test can replace it -------------
+function Get-HostPlatform {
+    <# .SYNOPSIS 'windows', 'macos', 'wsl' (pwsh inside a WSL distro) or 'linux'. #>
+    if ($IsWindows) { return 'windows' }
+    if ($IsMacOS) { return 'macos' }
+    if (Test-InsideWsl) { return 'wsl' }
+    return 'linux'
+}
+function Test-InsideWsl {
+    if ($env:WSL_DISTRO_NAME) { return $true }
+    # Unverified here: the WSL kernel string names Microsoft in /proc/version.
+    if (Test-Path -LiteralPath '/proc/version') { return [bool](Select-String -Path '/proc/version' -Pattern 'microsoft' -Quiet) }
+    return $false
+}
+function Test-DockerResponding {
+    <# .SYNOPSIS $true when `docker` is on PATH and `docker info` exits 0 (a stopped daemon fails it). #>
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { return $false }
+    & docker info *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+function Test-WslDockerResponding {
+    <# .SYNOPSIS $true when `wsl -e docker info` answers: Docker Engine in the default WSL distro. UNVERIFIED on a real Windows host: assumes the default distro and wsl.exe on PATH. #>
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return $false }
+    & wsl.exe -e docker info *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+function Get-WslcPath {
+    <# .SYNOPSIS wslc.exe from PATH, else C:\Program Files\WSL\wslc.exe, else $null (as Resolve-DockerPath did). #>
+    $wslc = Get-Command wslc.exe -ErrorAction SilentlyContinue
+    if ($wslc) { return $wslc.Source }
+    if (Test-Path 'C:\Program Files\WSL\wslc.exe') { return 'C:\Program Files\WSL\wslc.exe' }
+    return $null
+}
+function Test-HostSocket {
+    <# .SYNOPSIS $true when the path exists and is not a directory (a unix socket; a test replaces this). #>
+    param([string]$Path)
+    return [bool]$Path -and (Test-Path -LiteralPath $Path) -and -not (Test-Path -LiteralPath $Path -PathType Container)
+}
+function Get-WslHome {
+    <# .SYNOPSIS The default WSL distro's $HOME, asked through wsl.exe (windows-wsl-docker from Windows). #>
+    $h = (& wsl.exe -e sh -c 'printf %s "$HOME"') -join ''
+    if ($LASTEXITCODE -ne 0 -or -not $h) { throw 'windows-wsl-docker: could not read $HOME of the default WSL distro (wsl -e sh -c ...).' }
+    return $h
+}
+
+function Get-HostTypeId { <# .SYNOPSIS The known HOST_TYPE ids. #> return , $script:HostTypeIds }
+
+function Get-DefaultHostTypePriority {
+    <# .SYNOPSIS The default HOST_TYPE_PRIORITY for the OS the launcher runs on (proposal section 3). #>
+    switch (Get-HostPlatform) {
+        'windows' { return @('windows-docker', 'windows-wsl-docker', 'windows-wslc') }
+        'wsl' { return @('windows-wsl-docker') }
+        'macos' { return @('macos') }
+        default { return @('linux') }
+    }
+}
+
+function ConvertTo-HostTypeList {
+    <# .SYNOPSIS Splits an ordered comma list, rejecting an unknown id with the list of valid ones. #>
+    param([string]$Text, [string]$Setting)
+    $ids = @($Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    foreach ($id in $ids) {
+        if ($id -notin $script:HostTypeIds) {
+            throw "$Setting has an unknown host type '$id'. Known ids: $($script:HostTypeIds -join ', ')."
+        }
+    }
+    return , $ids
+}
+
+function Test-HostTypeFitsPlatform {
+    <# .SYNOPSIS $true when a launcher on this OS can act as that host type at all (no engine questions). #>
+    param([Parameter(Mandatory)][string]$Id)
+    switch ($Id) {
+        'windows-docker' { return (Get-HostPlatform) -eq 'windows' }
+        'windows-wslc' { return (Get-HostPlatform) -eq 'windows' }
+        'windows-wsl-docker' { return (Get-HostPlatform) -in 'windows', 'wsl' }
+        'linux' { return (Get-HostPlatform) -in 'linux', 'wsl' }
+        'macos' { return (Get-HostPlatform) -eq 'macos' }
+    }
+    return $false
+}
+
+function Test-HostTypeDetection {
+    <# .SYNOPSIS Detection of one id, with what was found. Returns @{ Ok; Note }. The checks are the ones the proposal names. #>
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not (Test-HostTypeFitsPlatform -Id $Id)) { return @{ Ok = $false; Note = "the launcher runs on $(Get-HostPlatform), not a host for $Id" } }
+    switch ($Id) {
+        'windows-docker' {
+            if (Test-DockerResponding) { return @{ Ok = $true; Note = '`docker info` answers' } }
+            return @{ Ok = $false; Note = '`docker` is not on PATH or `docker info` fails' }
+        }
+        'windows-wsl-docker' {
+            if ((Get-HostPlatform) -eq 'wsl') { return @{ Ok = $true; Note = 'running inside a WSL distro' } }
+            if (Test-WslDockerResponding) { return @{ Ok = $true; Note = '`wsl -e docker info` answers' } }
+            return @{ Ok = $false; Note = '`wsl -e docker info` does not answer' }
+        }
+        'windows-wslc' {
+            $p = Get-WslcPath
+            if ($p) { return @{ Ok = $true; Note = "wslc.exe found ($p)" } }
+            return @{ Ok = $false; Note = 'wslc.exe is not on PATH nor in C:\Program Files\WSL' }
+        }
+        'linux' { return @{ Ok = $true; Note = 'Linux, not WSL' } }
+        'macos' { return @{ Ok = $true; Note = 'macOS' } }
+    }
+}
+
+function Resolve-HostType {
+    <#
+    .SYNOPSIS
+        The host type: HOST_TYPE (default auto; an explicit id skips detection),
+        else the first id of HOST_TYPE_PRIORITY (default per OS) whose
+        detection passes. Returns @{ Type; Why; Priority }. An unknown id is an
+        error listing the valid ones.
+
+    .DESCRIPTION
+        DEVCONTAINER_DOCKER_PATH set and no id passing: the engine is given, so
+        the first id of the priority list that fits this OS is taken (Why says so).
+        Nothing passing and no DEVCONTAINER_DOCKER_PATH: an error naming each check.
+    #>
+    [CmdletBinding()]
+    param([string]$HostType, [string]$Priority)
+
+    $HostType = Get-SettingOrEnv $HostType 'HOST_TYPE' 'auto'
+    $priorityText = Get-SettingOrEnv $Priority 'HOST_TYPE_PRIORITY'
+    $source = 'HOST_TYPE_PRIORITY'
+    $list = if ($priorityText) { ConvertTo-HostTypeList -Text $priorityText -Setting 'HOST_TYPE_PRIORITY' }
+    else { $source = 'default for this OS'; @(Get-DefaultHostTypePriority) }
+
+    if ($HostType -ne 'auto') {
+        if ($HostType -notin $script:HostTypeIds) {
+            throw "HOST_TYPE '$HostType' is unknown. Known ids: auto, $($script:HostTypeIds -join ', ')."
+        }
+        if (-not (Test-HostTypeFitsPlatform -Id $HostType)) {
+            throw "HOST_TYPE '$HostType' cannot run from a launcher on $(Get-HostPlatform). Known ids: $($script:HostTypeIds -join ', ')."
+        }
+        return @{ Type = $HostType; Why = 'HOST_TYPE set explicitly (detection skipped)'; Priority = $list }
+    }
+
+    $notes = @()
+    foreach ($id in $list) {
+        $d = Test-HostTypeDetection -Id $id
+        if ($d.Ok) { return @{ Type = $id; Why = "auto: first in $source to pass (${id}: $($d.Note))"; Priority = $list } }
+        $notes += "$id`: $($d.Note)"
+    }
+    if (Get-SettingOrEnv '' 'DEVCONTAINER_DOCKER_PATH') {
+        $fit = $list | Where-Object { Test-HostTypeFitsPlatform -Id $_ } | Select-Object -First 1
+        if ($fit) { return @{ Type = $fit; Why = "auto: no check passed, DEVCONTAINER_DOCKER_PATH names the engine, so the first id in $source that fits this OS ($($notes -join '; '))"; Priority = $list } }
+    }
+    throw "HOST_TYPE=auto: no host type in [$($list -join ', ')] passed. $($notes -join '; '). Set HOST_TYPE=<id> ($($script:HostTypeIds -join ', ')), or HOST_TYPE_PRIORITY, or DEVCONTAINER_DOCKER_PATH."
+}
+
+function Get-CachedHostType {
+    $key = "$env:HOST_TYPE|$env:HOST_TYPE_PRIORITY|$env:DEVCONTAINER_DOCKER_PATH"
+    if (-not $script:HostProfileCache.ContainsKey($key)) { $script:HostProfileCache[$key] = Resolve-HostType }
+    return $script:HostProfileCache[$key]
+}
+
+function Resolve-EngineForHostType {
+    <# .SYNOPSIS The engine for a host type when DEVCONTAINER_DOCKER_PATH is unset: $null = `docker` on PATH (the CLI's default), else a full path. #>
+    param([Parameter(Mandatory)][string]$Type)
+    switch ($Type) {
+        'windows-wslc' {
+            $p = Get-WslcPath
+            if ($p) { return $p }
+            throw 'HOST_TYPE windows-wslc: wslc.exe not found (WSL >= 2.9.3), or set DEVCONTAINER_DOCKER_PATH.'
+        }
+        'windows-wsl-docker' {
+            if (Get-Command docker -ErrorAction SilentlyContinue) { return $null }
+            # --docker-path takes one executable, so `wsl -e docker` cannot be passed from Windows.
+            throw 'HOST_TYPE windows-wsl-docker from Windows needs a single command for --docker-path: put a docker CLI on PATH that talks to the distro, or set DEVCONTAINER_DOCKER_PATH.'
+        }
+        default {
+            if (Get-Command docker -ErrorAction SilentlyContinue) { return $null }
+            if ($Type -eq 'windows-docker') { throw 'HOST_TYPE windows-docker: docker is not on PATH; install Docker Desktop or set DEVCONTAINER_DOCKER_PATH.' }
+            throw 'docker is not on PATH; install a Docker-compatible engine or set DEVCONTAINER_DOCKER_PATH.'
+        }
+    }
+}
+
+function Resolve-SshAgent {
+    <#
+    .SYNOPSIS
+        The SSH agent for a host type (proposal section 5): @{ Mode = socket|none|key; Socket }.
+    .DESCRIPTION
+        SSH_AGENT_MODE=key is the user's opt-in to a signing key kept in the container: Mode key,
+        no socket mounted. Otherwise linux and windows-wsl-docker (from inside the distro) take
+        $env:SSH_AUTH_SOCK when it is set and a socket exists; macos takes Docker Desktop's
+        /run/host-services/ssh-auth.sock (a path in its VM, not checkable here); windows-docker,
+        windows-wslc and windows-wsl-docker driven from Windows are none: the Windows agent is a
+        named pipe and bridging it needs a process of ours left running on the host, which is
+        ruled out. Mode none and key are reported by the container as such.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Type)
+    if ((Get-SettingOrEnv '' 'SSH_AGENT_MODE') -eq 'key') { return @{ Mode = 'key'; Socket = '' } }
+    switch ($Type) {
+        { $_ -in 'linux', 'windows-wsl-docker' } {
+            if ((Get-HostPlatform) -ne 'windows' -and (Test-HostSocket -Path $env:SSH_AUTH_SOCK)) { return @{ Mode = 'socket'; Socket = $env:SSH_AUTH_SOCK } }
+        }
+        'macos' { return @{ Mode = 'socket'; Socket = '/run/host-services/ssh-auth.sock' } }
+    }
+    return @{ Mode = 'none'; Socket = '' }
+}
+
+function Resolve-HostProfile {
+    <#
+    .SYNOPSIS
+        Everything the launcher knows about the host: Type, Why, Priority, Engine
+        (the command shown), EnginePath ($null = docker on PATH), and the three
+        DCF_HOST_* values: Home, SshAgent (socket, none or key), SshSocket (the host
+        socket the agent mount takes, or empty) and CloudFolder (DCF_HOST_CLOUD_FOLDER as given, or
+        empty).
+    #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+    $t = Get-CachedHostType
+    $spec = Get-SettingOrEnv $DockerPath 'DEVCONTAINER_DOCKER_PATH'
+    # An engine problem is shown by `host`, not thrown from here: the CLI path throws it itself.
+    $engineError = $null
+    try { $enginePath = Resolve-DockerPath -DockerPath $DockerPath } catch { $enginePath = $null; $engineError = $_.Exception.Message }
+    $engine = if ($engineError) { "(none: $engineError)" } elseif ($enginePath) { $enginePath } elseif ($spec) { $spec } else { 'docker' }
+    $hostHome = switch ($t.Type) {
+        'windows-docker' { $env:USERPROFILE }
+        'windows-wslc' { $env:USERPROFILE }
+        'windows-wsl-docker' { if ((Get-HostPlatform) -eq 'windows') { Get-WslHome } else { $env:HOME } }
+        default { $env:HOME }
+    }
+    $agent = Resolve-SshAgent -Type $t.Type
+    # FUSE: asked for (DCF_HOST_FUSE), and granted only where the engine takes the run arguments.
+    $fuseAsked = Test-FuseRequested
+    $fuseRefusal = Get-FuseRefusal -Type $t.Type -Engine $(if ($enginePath) { $enginePath } else { $spec })
+    return [pscustomobject]@{
+        Type = $t.Type; Why = $t.Why; Priority = $t.Priority
+        Engine = $engine; EnginePath = $enginePath
+        Home = $hostHome; SshAgent = $agent.Mode; SshSocket = $agent.Socket
+        CloudFolder = (Get-SettingOrEnv '' 'DCF_HOST_CLOUD_FOLDER')
+        Fuse = ($fuseAsked -and -not $fuseRefusal); FuseRequested = $fuseAsked; FuseRefusal = $fuseRefusal
+        # wslg only after Initialize-HostAudio (up) bound the socket; `host` and the other subcommands say none.
+        Audio = $(if ($script:HostAudio) { $script:HostAudio } else { 'none' }); AudioRequest = (Get-AudioRequest)
+    }
+}
+
+# FUSE on request (cloud-folder proposal, slice 3; ADR 0031; the bash twin's fuse_vars and
+# fuse_args). A Feature's capAdd and securityOpt are static and `devcontainer up` has no option
+# for run arguments, so the grant travels as three variables the repository's runArgs read.
+$script:FuseGrant = [ordered]@{
+    DCF_HOST_FUSE_DEVICE   = '--device=/dev/fuse'
+    DCF_HOST_FUSE_CAP      = '--cap-add=SYS_ADMIN'
+    DCF_HOST_FUSE_SECURITY = '--security-opt=apparmor=unconfined'
+}
+
+function Test-FuseRequested {
+    <# .SYNOPSIS $true when DCF_HOST_FUSE (environment, or the parameter the entry script copies into it) is 1, true, yes or on. #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param()
+    return ("$env:DCF_HOST_FUSE".Trim().ToLowerInvariant() -in '1', 'true', 'yes', 'on')
+}
+
+# wslc (WSL Containers 3.0.3: `wslc run --help`) has no --device, --cap-add or --security-opt
+# option and refuses the whole run ("Option name was not recognized") when runArgs carry one, so
+# on that engine the grant is withheld, with a warning: the container starts without FUSE and the
+# cloud-folder Feature's auto mode takes sync.
+function Get-FuseRefusal {
+    <# .SYNOPSIS Why this host cannot carry the FUSE grant, or $null when it can: the windows-wslc host type, or an engine command named wslc, has no run option for a device, a capability or a security option. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Type, [AllowEmptyString()][string]$Engine = '')
+    # Split on both separators: [IO.Path] on Linux or macOS leaves a Windows path whole.
+    $leaf = if ($Engine) { [IO.Path]::GetFileNameWithoutExtension(($Engine -split '[\\/]')[-1]).ToLowerInvariant() } else { '' }
+    if ($Type -eq 'windows-wslc' -or $leaf -eq 'wslc') {
+        return 'wslc run (WSL Containers) has no --device, --cap-add or --security-opt option, so the cloud-folder Feature''s mount mode cannot run here; its auto mode takes sync'
+    }
+    return $null
+}
+
+function Get-FuseRunArgument {
+    <# .SYNOPSIS The grant: an ordered map of DCF_HOST_FUSE_* to the run argument each carries; empty when not requested. #>
+    [CmdletBinding()]
+    param([bool]$Requested = (Test-FuseRequested))
+    if (-not $Requested) { return [ordered]@{} }
+    return $script:FuseGrant
+}
+
+function Get-FuseSlotMissing {
+    <# .SYNOPSIS The DCF_HOST_FUSE_* names the repository's devcontainer.json does not read with ${localEnv:...} outside comments; none when there is no file. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @())
+    $file = Get-DevcontainerConfigFile -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments
+    if (-not $file) { return @() }
+    $text = ConvertTo-JsonWithoutComment -Text (Get-Content -LiteralPath $file -Raw)
+    return @($script:FuseGrant.Keys | Where-Object { -not $text.Contains('${localEnv:' + $_) })
+}
+
+function Write-FuseSlotWarning {
+    <# .SYNOPSIS When FUSE is granted, one warning if the repository's devcontainer.json cannot carry the grant (none when the host refuses it: Write-FuseRefusedWarning says why). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @(), [string]$DockerPath)
+    if (-not (Resolve-HostProfile -DockerPath $DockerPath).Fuse) { return }
+    $missing = @(Get-FuseSlotMissing -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments)
+    if ($missing.Count) {
+        Write-Warning "DCF_HOST_FUSE=1, but the repository's devcontainer.json has no runArgs reading $($missing -join ' ') (`${localEnv:<name>:<default>}): FUSE does not reach the container. Copy the three runArgs lines from the bootstrap's devcontainer.json."
+    }
+}
+
+function Write-FuseRefusedWarning {
+    <# .SYNOPSIS When FUSE is asked for and this host cannot carry the grant, one warning naming why; the start goes on without FUSE. #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+    $p = Resolve-HostProfile -DockerPath $DockerPath
+    if ($p.FuseRequested -and $p.FuseRefusal) {
+        Write-Warning "DCF_HOST_FUSE=1, but FUSE is not granted on this host ($($p.Type)): $($p.FuseRefusal). The container starts without it; unset DCF_HOST_FUSE in .devcontainer/.env on this machine to drop this warning."
+    }
+}
+
+# Audio on request, gated on the workstation (the audio Feature; backlog audio-feature,
+# audio-gate-ttl; ADR 0057): DCF_HOST_AUDIO=wslg asks that the container may have the workstation's
+# microphone through WSLg's PulseAudio socket, but only while the engineer turned it on. The
+# container engine's WSL distro does not see /mnt/wslg, but every WSL2 distro shares /mnt/wsl, so
+# before `up` the launcher makes a relay directory there, /mnt/wsl/devhost-audio (as root through
+# wsl.exe), and mounts it at /mnt/wslg, where the Feature's PULSE_SERVER points. WSLg's own socket is
+# never mounted: the directory is empty, the microphone is OFF, until `audio on [<duration>]` starts
+# a socat relay in the default distro from <dir>/PulseServer to /mnt/wslg/PulseServer, ended by the
+# duration (timeout) or by `audio off`, and then the socket file is gone again. The switch lives on
+# the workstation, outside the container, so no process in the container can undo it, and changing
+# it needs no rebuild. DCF_HOST_AUDIO then says what the launcher did: wslg or none. Unset or none
+# asks for nothing and runs nothing. Never fails a start: anything missing is one warning and none.
+# The bash twin is audio_request and friends in devcontainer-cli.sh; the two scripts below are the
+# same text there (test/bootstrap/host_mounts_test.sh compares them).
+$script:AudioSource = '/mnt/wsl/devhost-audio'
+$script:AudioTarget = '/mnt/wslg'
+$script:AudioWslgSocket = '/mnt/wslg/PulseServer'
+# Proven on Rancher Desktop (windows-docker); windows-wsl-docker's engine runs in a distro, which shares /mnt/wsl.
+$script:AudioHostTypes = @('windows-docker', 'windows-wsl-docker')
+# One line of sh each for `wsl.exe -u root -e sh -c`: no double quotes and no newline to survive the Windows command line.
+$script:AudioPrepareScript = 't=/mnt/wsl/devhost-audio; if [ ! -S /mnt/wslg/PulseServer ]; then echo nopulse; elif [ -d $t ]; then echo present; else mkdir -p $t && chmod 755 $t && echo bound; fi'
+# sh -c <this> sh <on|off|status> <seconds> <dir> <WSLg socket>: prints on <seconds left>, off, nosocat, nopulse or failed.
+$script:AudioRelayScript = 'a=$1; t=$2; d=$3; w=$4; s=$d/PulseServer; p=$d.pid; stop() { [ -S $s ] && [ -s $p ] && kill -- -$(cat $p) 2>/dev/null; rm -f $s $d/expires $p; }; left() { [ -s $p ] && kill -0 $(cat $p) 2>/dev/null && [ -S $s ] && [ -s $d/expires ] && echo $(( $(cat $d/expires) - $(date +%s) )); }; case $a in on) command -v socat >/dev/null || { echo nosocat; exit 0; }; [ -S $w ] || { echo nopulse; exit 0; }; mkdir -p $d || exit 1; stop; echo $(( $(date +%s) + t )) > $d/expires; setsid sh -c ''echo $$ > $1; exec timeout $2 socat UNIX-LISTEN:$3,fork,mode=0666 UNIX-CONNECT:$4'' sh $p $t $s $w >/dev/null 2>&1 </dev/null & i=0; while [ ! -S $s ] && [ $i -lt 30 ]; do sleep 0.1; i=$((i+1)); done; if [ -S $s ]; then echo on $t; else stop; echo failed; fi ;; off) stop; echo off ;; status) r=$(left); case $r in '''') stop; echo off ;; *) echo on $r ;; esac ;; *) echo usage ;; esac'
+# What Initialize-HostAudio decided in this launcher run (wslg or none); $null until it ran.
+$script:HostAudio = $null
+
+function Get-AudioRequest {
+    <# .SYNOPSIS What DCF_HOST_AUDIO asks for: 'wslg', 'none' (unset, empty or none) or 'unknown' (anything else). #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $v = "$env:DCF_HOST_AUDIO".Trim().ToLowerInvariant()
+    if ($v -in '', 'none') { return 'none' }
+    if ($v -eq 'wslg') { return 'wslg' }
+    return 'unknown'
+}
+
+function Get-AudioRefusal {
+    <# .SYNOPSIS Why this host cannot carry WSLg's socket, or $null when it can: a host type not backed by WSL2 as proven, or HOST_MOUNTS=false. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Type)
+    if (-not (Test-HostMountsEnabled)) { return 'HOST_MOUNTS=false turns the launcher''s mounts off, the audio mount with them' }
+    if ($Type -eq 'windows-wslc') { return 'not verified on windows-wslc (whether wslc run can bind a path of the WSL VM is unknown), so nothing is mounted there' }
+    if ($Type -notin $script:AudioHostTypes) { return "$Type is not a Windows host type backed by WSL2 ($($script:AudioHostTypes -join ', ')); WSLg's socket is a WSL path" }
+    return $null
+}
+
+function Invoke-WslSh {
+    <# .SYNOPSIS Runs `sh -c <Script> sh <Arguments>` in the default WSL distro as root: the last line of its output, 'nowsl' (no wsl.exe), or 'error: <output>'. A test replaces this. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Script, [string[]]$Arguments = @())
+    if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) { return 'nowsl' }
+    $out = @(& wsl.exe -u root -e sh -c $Script sh @Arguments 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    $last = if ($out.Count) { $out[-1] } else { '' }
+    if ($LASTEXITCODE -eq 0 -and $last) { return $last }
+    return "error: exit $LASTEXITCODE$(if ($out.Count) { ': ' + ($out -join ' ') })"
+}
+
+function Invoke-WslgBind {
+    <# .SYNOPSIS Makes the relay directory in the default WSL distro as root: 'present', 'bound' (made now), 'nopulse', 'nowsl' (no wsl.exe), or 'error: <output>'. A test replaces this. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    Invoke-WslSh -Script $script:AudioPrepareScript
+}
+
+function Initialize-HostAudio {
+    <#
+    .SYNOPSIS
+        `up`: when DCF_HOST_AUDIO=wslg and the host can carry it, makes WSLg's socket visible at
+        /mnt/wsl/wslg (Invoke-WslgBind, once per launcher run) and returns 'wslg'; otherwise 'none',
+        with one warning when audio was asked for. Unset or none: returns 'none' and runs nothing.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    if ($script:HostAudio) { return $script:HostAudio }
+    $script:HostAudio = 'none'
+    $ask = Get-AudioRequest
+    if ($ask -eq 'none') { return 'none' }
+    $noAudio = 'The container starts without audio; DCF_HOST_AUDIO=none in .devcontainer/.env on this machine drops this warning.'
+    if ($ask -eq 'unknown') {
+        Write-Warning "DCF_HOST_AUDIO='$env:DCF_HOST_AUDIO' is not known (none, wslg). $noAudio"
+        return 'none'
+    }
+    $type = (Get-CachedHostType).Type
+    $refusal = Get-AudioRefusal -Type $type
+    if ($refusal) {
+        Write-Warning "DCF_HOST_AUDIO=wslg, but no audio on this host ($type): $refusal. $noAudio"
+        return 'none'
+    }
+    $r = Invoke-WslgBind
+    switch ($r) {
+        'present' { Write-Host "audio: the relay directory $($script:AudioSource) is there; the microphone is on only while task audio:on runs"; $script:HostAudio = 'wslg' }
+        'bound' { Write-Host "audio: made the relay directory $($script:AudioSource) in the default WSL distro (as root; a WSL restart drops it and the next up redoes it); the microphone is OFF until task audio:on"; $script:HostAudio = 'wslg' }
+        'nopulse' { Write-Warning "DCF_HOST_AUDIO=wslg, but the default WSL distro has no /mnt/wslg/PulseServer (WSLg off or missing, WSL1, or the engine's own distro set as the default). $noAudio" }
+        'nowsl' { Write-Warning "DCF_HOST_AUDIO=wslg, but wsl.exe is not on PATH, so the default distro's WSLg socket cannot be reached. $noAudio" }
+        default { Write-Warning "DCF_HOST_AUDIO=wslg, but making the relay directory in the default WSL distro failed ($r). $noAudio" }
+    }
+    return $script:HostAudio
+}
+
+function ConvertTo-AudioSecond {
+    <# .SYNOPSIS A duration (90s, 15m, 2h; a bare number is minutes) as seconds; $null when it is not one. #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param([string]$Text)
+    $m = [regex]::Match("$Text".Trim().ToLowerInvariant(), '^(\d{1,6})([smh]?)$')
+    if (-not $m.Success) { return $null }
+    $n = [int]$m.Groups[1].Value
+    switch ($m.Groups[2].Value) { 's' { $n } 'h' { $n * 3600 } default { $n * 60 } }
+}
+
+function Format-AudioDuration {
+    <# .SYNOPSIS Seconds as 1h30m, 15m, 12m34s or 45s. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][int]$Seconds)
+    $h = [math]::Floor($Seconds / 3600); $m = [math]::Floor(($Seconds % 3600) / 60); $s = $Seconds % 60
+    if ($h -gt 0) { return "${h}h$(if ($m) { "${m}m" })" }
+    if ($m -gt 0) { return "${m}m$(if ($s) { "${s}s" })" }
+    "${s}s"
+}
+
+function Invoke-HostAudio {
+    <#
+    .SYNOPSIS
+        The workstation's switch for the microphone (task audio:on, audio:off, audio:status):
+        `on [<duration>]`, `off` or `status`, each one `wsl.exe` call into the default distro that
+        starts, ends or asks the socat relay there (never a process of this launcher). The duration
+        is DCF_HOST_AUDIO_TTL (default 15m) when not given, and at most DCF_HOST_AUDIO_TTL_MAX
+        (default 2h). Returns 0, or 1 after saying why on stderr.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param([string[]]$Arguments = @())
+    $action = if ($Arguments.Count) { $Arguments[0] } else { 'status' }
+    $type = (Get-CachedHostType).Type
+    $refusal = Get-AudioRefusal -Type $type
+    if ($refusal) { [Console]::Error.WriteLine("audio: not on this host ($type): $refusal."); return 1 }
+    if ((Get-AudioRequest) -ne 'wslg') { [Console]::Error.WriteLine('audio: note: DCF_HOST_AUDIO is not wslg here, so up mounts no relay directory in a container; set it in .devcontainer/.env and rebuild.') }
+    $relay = { param($a, $n) Invoke-WslSh -Script $script:AudioRelayScript -Arguments @($a, "$n", $script:AudioSource, $script:AudioWslgSocket) }
+    switch ($action) {
+        'on' {
+            $text = if ($Arguments.Count -gt 1 -and $Arguments[1]) { $Arguments[1] } elseif ($env:DCF_HOST_AUDIO_TTL) { $env:DCF_HOST_AUDIO_TTL } else { '15m' }
+            $max = ConvertTo-AudioSecond ($(if ($env:DCF_HOST_AUDIO_TTL_MAX) { $env:DCF_HOST_AUDIO_TTL_MAX } else { '2h' }))
+            if (-not $max) { $max = 7200 }
+            $secs = ConvertTo-AudioSecond $text
+            if (-not $secs) { [Console]::Error.WriteLine("audio: '$text' is not a duration (for example 90s, 15m, 2h; a bare number is minutes)."); return 1 }
+            if ($secs -gt $max) {
+                [Console]::Error.WriteLine("audio: $(Format-AudioDuration $secs) is more than the longest allowed, $(Format-AudioDuration $max) (DCF_HOST_AUDIO_TTL_MAX); using that.")
+                $secs = $max
+            }
+            if ((Invoke-WslgBind) -eq 'bound') { [Console]::Error.WriteLine("audio: made the relay directory $($script:AudioSource); a container that was already running does not see it: task devcontainer:up (or :rebuild) once.") }
+            $r = & $relay 'on' $secs
+            if ($r -like 'on*') { Write-Host "audio: ON for $(Format-AudioDuration $secs): the container's processes can record until then; task audio:off ends it."; return 0 }
+            $msg = switch -Wildcard ($r) {
+                'nosocat' { 'socat is not installed in the default WSL distro (run task audio:setup on the workstation); nothing was turned on.' }
+                'nopulse' { 'the default WSL distro has no /mnt/wslg/PulseServer (WSLg off or missing, WSL1, or the engine''s own distro set as the default); nothing was turned on.' }
+                'nowsl' { 'wsl.exe is not on PATH (WSL interop off?); nothing was turned on.' }
+                default { "the relay did not start ($r); the microphone stays off." }
+            }
+            [Console]::Error.WriteLine("audio: $msg")
+            return 1
+        }
+        'off' {
+            $r = & $relay 'off' 0
+            if ($r -eq 'off') { Write-Host 'audio: OFF: the relay is ended and the socket is gone from the container.'; return 0 }
+            [Console]::Error.WriteLine($(if ($r -eq 'nowsl') { 'audio: wsl.exe is not on PATH (WSL interop off?).' } else { "audio: could not turn it off ($r)." }))
+            return 1
+        }
+        'status' {
+            $r = & $relay 'status' 0
+            if ($r -match '^on (\d+)$') { Write-Host "audio: ON, $(Format-AudioDuration ([int]$Matches[1])) left (task audio:off ends it)."; return 0 }
+            if ($r -eq 'off') { Write-Host 'audio: OFF (task audio:on starts it).'; return 0 }
+            [Console]::Error.WriteLine($(if ($r -eq 'nowsl') { 'audio: wsl.exe is not on PATH (WSL interop off?).' } else { "audio: could not tell ($r)." }))
+            return 1
+        }
+        default { [Console]::Error.WriteLine("audio: unknown action '$action' (on [<duration>], off, status)."); return 1 }
+    }
+}
+
+# The machine name (docs/proposals/session-names.md, slice 1; the bash twin's sanitise_machine and
+# resolve_machine): DCF_HOST_MACHINE is the workstation's own name, $env:COMPUTERNAME on Windows,
+# else the host name up to the first dot, cut to letters, digits, dot, underscore and hyphen (anything
+# else becomes a hyphen, runs collapse, no leading or trailing hyphen or dot), at most 63 characters.
+function ConvertTo-MachineName {
+    <# .SYNOPSIS A machine name cut to the safe set [A-Za-z0-9._-]: other characters become hyphens, runs collapse, no leading or trailing hyphen or dot, at most 63 characters. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([AllowEmptyString()][string]$Name = '')
+    $n = [regex]::Replace($Name, '[^A-Za-z0-9._-]', '-')
+    $n = [regex]::Replace($n, '-+', '-')
+    $n = $n.Trim('-', '.')
+    if ($n.Length -gt 63) { $n = $n.Substring(0, 63).Trim('-', '.') }
+    return $n
+}
+
+function Get-HostMachineName {
+    <# .SYNOPSIS The workstation's machine name for DCF_HOST_MACHINE: $env:COMPUTERNAME, else the host name before its first dot, sanitised. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    $raw = "$env:COMPUTERNAME"
+    if (-not $raw) { $raw = ([System.Net.Dns]::GetHostName() -split '\.')[0] }
+    return ConvertTo-MachineName -Name $raw
+}
+
+function Test-MachineSlotMissing {
+    <# .SYNOPSIS $true when the repository's devcontainer.json (outside comments) does not read ${localEnv:DCF_HOST_MACHINE}; $false when it does or there is no file. #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @())
+    $file = Get-DevcontainerConfigFile -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments
+    if (-not $file) { return $false }
+    $text = ConvertTo-JsonWithoutComment -Text (Get-Content -LiteralPath $file -Raw)
+    return -not $text.Contains('${localEnv:DCF_HOST_MACHINE')
+}
+
+function Write-MachineSlotWarning {
+    <# .SYNOPSIS One warning, never a failure, when the repository's devcontainer.json lacks the DCF_HOST_MACHINE line. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @())
+    if (Test-MachineSlotMissing -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments) {
+        Write-Warning "The repository's devcontainer.json does not read DCF_HOST_MACHINE (`"DCF_HOST_MACHINE`": `"`${localEnv:DCF_HOST_MACHINE}`" in containerEnv): agents' session names show `"container`" for {machine} until it does. Copy the line from the bootstrap's devcontainer.json."
+    }
+}
+
+function Initialize-HostEnvironment {
+    <# .SYNOPSIS Sets DCF_HOST_TYPE, DCF_HOST_HOME, DCF_HOST_SSH_AGENT, DCF_HOST_CLOUD_FOLDER, DCF_HOST_AUDIO and the FUSE grant (DCF_HOST_FUSE and DCF_HOST_FUSE_*) in this process, so the devcontainer CLI (and ${localEnv:...} in a repo's devcontainer.json) sees them. Returns the profile. #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+    $p = Resolve-HostProfile -DockerPath $DockerPath
+    [Environment]::SetEnvironmentVariable('DCF_HOST_TYPE', $p.Type)
+    [Environment]::SetEnvironmentVariable('DCF_HOST_HOME', $p.Home)
+    [Environment]::SetEnvironmentVariable('DCF_HOST_SSH_AGENT', $p.SshAgent)
+    # Passed on unchanged (the user's value), so containerEnv can map it; empty removes it.
+    [Environment]::SetEnvironmentVariable('DCF_HOST_CLOUD_FOLDER', $p.CloudFolder)
+    # The workstation's machine name: always the launcher's own value, empty removes it.
+    $machine = Get-HostMachineName
+    if ($machine) { [Environment]::SetEnvironmentVariable('DCF_HOST_MACHINE', $machine) }
+    else { Remove-Item -LiteralPath 'Env:DCF_HOST_MACHINE' -ErrorAction SilentlyContinue }
+    # The FUSE grant from the fixed list when asked for; removed otherwise, so a value left in the
+    # user's environment or .env never reaches runArgs.
+    [Environment]::SetEnvironmentVariable('DCF_HOST_FUSE', $(if ($p.Fuse) { '1' } else { '' }))
+    # What the launcher did for audio (wslg or none), for containerEnv; never the user's own value.
+    [Environment]::SetEnvironmentVariable('DCF_HOST_AUDIO', $p.Audio)
+    $grant = Get-FuseRunArgument -Requested $p.Fuse
+    foreach ($name in $script:FuseGrant.Keys) {
+        # Remove-Item, not SetEnvironmentVariable(name, $null): PowerShell passes $null to a string
+        # parameter as '', which on Linux and macOS leaves the variable set and empty, and an empty
+        # value would replace runArgs' default with an empty argument.
+        if ($grant.Contains($name)) { [Environment]::SetEnvironmentVariable($name, $grant[$name]) }
+        else { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+    }
+    return $p
+}
+
+# ---------------------------------------------------------------- host mounts ----
+# The mounts the launcher adds to `devcontainer up` (--mount), per host type: the host home's
+# .git-dirs (slice 3), the SSH agent socket at the ssh-agent Feature's fixed path (slice 4), and
+# the host folder DCF_HOST_CLOUD_FOLDER at the cloud-folder Feature's fixed host mount (cloud-folder
+# proposal, slice 1; the same constant is cloud_folder_target in devcontainer-cli.sh and HOST_MOUNT
+# in the Feature's install.sh). Add a case to the switch, or an entry to the array of a case: nothing else changes.
+$script:SshAgentTarget = '/var/lib/devcontainer-features/ssh-agent/agent.sock'
+$script:CloudFolderTarget = '/mnt/cloud-folder-host'
+function Get-HostMount {
+    <#
+    .SYNOPSIS
+        The host mounts for a host type: objects with Name, Source, Target and Type.
+        git-dirs is empty when the home is unknown; ssh-agent is present only with
+        -SshAgent socket and a -SshSocket source; cloud-folder only with a -CloudFolder source,
+        always at /mnt/cloud-folder-host; audio (the relay directory /mnt/wsl/devhost-audio at /mnt/wslg) only with -Audio wslg.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Type, [string]$HostHome, [string]$SshAgent = 'none', [string]$SshSocket, [string]$CloudFolder, [string]$Audio = 'none')
+    $mounts = @()
+    if ($HostHome) {
+        switch ($Type) {
+            { $_ -in 'windows-docker', 'windows-wsl-docker', 'windows-wslc', 'linux', 'macos' } {
+                # Windows homes are C:\Users\<user>; the engine accepts the mixed form that
+                # ${localEnv:USERPROFILE}/.git-dirs has always produced, so the same is built here.
+                $mounts += [pscustomobject]@{ Name = 'git-dirs'; Source = "$HostHome/.git-dirs"; Target = '/git-dirs'; Type = 'bind' }
+            }
+        }
+    }
+    if ($SshAgent -eq 'socket' -and $SshSocket) {
+        $mounts += [pscustomobject]@{ Name = 'ssh-agent'; Source = $SshSocket; Target = $script:SshAgentTarget; Type = 'bind' }
+    }
+    if ($CloudFolder) {
+        $mounts += [pscustomobject]@{ Name = 'cloud-folder'; Source = $CloudFolder; Target = $script:CloudFolderTarget; Type = 'bind' }
+    }
+    if ($Audio -eq 'wslg') {
+        $mounts += [pscustomobject]@{ Name = 'audio'; Source = $script:AudioSource; Target = $script:AudioTarget; Type = 'bind' }
+    }
+    return $mounts
+}
+
+function ConvertTo-MountArgument {
+    <# .SYNOPSIS The value of one `--mount` option for a host mount. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Mount)
+    return "type=$($Mount.Type),source=$($Mount.Source),target=$($Mount.Target)"
+}
+
+function ConvertTo-JsonWithoutComment {
+    <# .SYNOPSIS Strips // and /* */ comments from JSONC text, leaving strings untouched. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+    $sb = [System.Text.StringBuilder]::new($Text.Length)
+    $n = $Text.Length; $i = 0
+    while ($i -lt $n) {
+        $c = $Text[$i]
+        $d = if ($i + 1 -lt $n) { $Text.Substring($i, 2) } else { [string]$c }
+        if ($c -eq '"') {
+            [void]$sb.Append($c); $i++
+            while ($i -lt $n) {
+                $c = $Text[$i]; [void]$sb.Append($c); $i++
+                if ($c -eq '\' -and $i -lt $n) { [void]$sb.Append($Text[$i]); $i++ }
+                elseif ($c -eq '"') { break }
+            }
+        }
+        elseif ($d -eq '//') { while ($i -lt $n -and $Text[$i] -ne "`n") { $i++ } }
+        elseif ($d -eq '/*') { $end = $Text.IndexOf('*/', $i + 2); $i = if ($end -lt 0) { $n } else { $end + 2 } }
+        else { [void]$sb.Append($c); $i++ }
+    }
+    return $sb.ToString()
+}
+
+function Get-DevcontainerConfigFile {
+    <# .SYNOPSIS The repository's devcontainer.json: the file --config names in $Arguments, else .devcontainer/devcontainer.json, else .devcontainer.json; $null when there is none. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @())
+    $file = $null
+    for ($i = 0; $i -lt $Arguments.Count; $i++) {
+        if ($Arguments[$i] -eq '--config' -and $i + 1 -lt $Arguments.Count) { $file = $Arguments[$i + 1] }
+        elseif ($Arguments[$i] -like '--config=*') { $file = $Arguments[$i].Substring(9) }
+    }
+    if (-not $file) {
+        foreach ($rel in '.devcontainer/devcontainer.json', '.devcontainer.json') {
+            $candidate = Join-Path $WorkspaceFolder $rel
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $file = $candidate; break }
+        }
+    }
+    if (-not $file -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { return $null }
+    return $file
+}
+
+function Get-ConfiguredMountTarget {
+    <#
+    .SYNOPSIS
+        The mount targets the repository's own devcontainer.json declares (strings
+        `source=..,target=/x` and objects with "target"): the file --config names in
+        $Arguments, else .devcontainer/devcontainer.json, else .devcontainer.json.
+    .DESCRIPTION
+        Read straight from the file (comments stripped, no JSON parser, so trailing commas
+        are fine) rather than with `devcontainer read-configuration`: that costs a second
+        Node start (about 0.25-0.5 s), asks the engine (`docker ps`) and fails when the
+        engine is down, which `host` must survive. Mounts that Features declare and
+        docker-compose files are not seen; neither declares the host mounts.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @())
+    $file = Get-DevcontainerConfigFile -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments
+    if (-not $file) { return @() }
+    $text = ConvertTo-JsonWithoutComment -Text (Get-Content -LiteralPath $file -Raw)
+    $targets = [System.Collections.Generic.List[string]]::new()
+    foreach ($m in [regex]::Matches($text, '"mounts"\s*:\s*\[[^\]]*\]')) {
+        foreach ($t in [regex]::Matches($m.Value, '(?:target|destination|dst)=([^,"\s]+)')) { $targets.Add($t.Groups[1].Value.TrimEnd('/')) }
+        foreach ($t in [regex]::Matches($m.Value, '"(?:target|destination)"\s*:\s*"([^"]+)"')) { $targets.Add($t.Groups[1].Value.TrimEnd('/')) }
+    }
+    return @($targets)
+}
+
+function Test-HostMountsEnabled {
+    <# .SYNOPSIS $false when HOST_MOUNTS is false, 0 or no (environment variable or the parameter the entry script copies into it). #>
+    [CmdletBinding()]
+    param()
+    return (Get-SettingOrEnv '' 'HOST_MOUNTS' 'true') -notin @('false', '0', 'no')
+}
+
+function Resolve-HostMount {
+    <#
+    .SYNOPSIS
+        What the launcher would mount: @{ Enabled; Add = mounts to pass; Skip = mounts the
+        repository already declares }. Starts nothing and creates nothing.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @(), [string]$DockerPath)
+    if (-not (Test-HostMountsEnabled)) { return [pscustomobject]@{ Enabled = $false; Add = @(); Skip = @() } }
+    $p = Resolve-HostProfile -DockerPath $DockerPath
+    $configured = @(Get-ConfiguredMountTarget -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments)
+    $add = @(); $skip = @()
+    foreach ($m in @(Get-HostMount -Type $p.Type -HostHome $p.Home -SshAgent $p.SshAgent -SshSocket $p.SshSocket -CloudFolder $p.CloudFolder -Audio $p.Audio)) {
+        if ($configured -contains $m.Target) { $skip += $m } else { $add += $m }
+    }
+    return [pscustomobject]@{ Enabled = $true; Add = $add; Skip = $skip }
+}
+
+function Initialize-HostMountSource {
+    <# .SYNOPSIS Creates the host folder of a bind mount when it is a path this launcher can reach (idempotent), so a start never fails on a missing source. A failure is a warning, never fatal. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Mount, [Parameter(Mandatory)][string]$Type)
+    # A socket is not ours to create, nor is the user's cloud folder (an empty one would hide a wrong path).
+    # Nor the audio relay directory, a path of the WSL VM that Initialize-HostAudio made.
+    if ($Mount.Name -in 'ssh-agent', 'cloud-folder', 'audio') { return }
+    # windows-wsl-docker driven from Windows has a distro path (/home/...) that Windows cannot create.
+    if ($Type -eq 'windows-wsl-docker' -and (Get-HostPlatform) -eq 'windows') { return }
+    try { if (-not (Test-Path -LiteralPath $Mount.Source)) { [void](New-Item -ItemType Directory -Path $Mount.Source -Force) } }
+    catch { Write-Warning "host mount: could not create $($Mount.Source): $($_.Exception.Message)" }
+}
+
+function Test-CloudFolderMount {
+    <#
+    .SYNOPSIS
+        $true when the cloud-folder mount can be passed: a source that is a folder on this host. A source this launcher cannot check (a Windows path from Linux or
+        macOS, a distro path from Windows) goes to the engine as is. A refusal is one warning;
+        the container then starts without the folder and its status says so.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)]$Mount)
+    $windowsPath = $Mount.Source -match '^([A-Za-z]:[\\/]|\\\\)'
+    $checkable = if ((Get-HostPlatform) -eq 'windows') { $windowsPath } else { $Mount.Source.StartsWith('/') }
+    if ($checkable -and -not (Test-Path -LiteralPath $Mount.Source -PathType Container)) {
+        Write-Warning "host mount cloud-folder skipped: DCF_HOST_CLOUD_FOLDER '$($Mount.Source)' is not a folder on this host; the container starts without it (task cloud-folder:status says so)."
+        return $false
+    }
+    return $true
+}
+
+function Get-HostMountArgument {
+    <#
+    .SYNOPSIS
+        The `--mount <spec>` arguments for `up`, after printing one line per skipped mount.
+        Creates each source folder. Empty when HOST_MOUNTS=false.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @(), [string]$DockerPath)
+    $r = Resolve-HostMount -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath
+    $type = (Resolve-HostProfile -DockerPath $DockerPath).Type
+    $out = @()
+    foreach ($m in $r.Skip) { Write-Host "host mount skipped: $($m.Target) is already mounted by this repository's devcontainer.json" }
+    foreach ($m in $r.Add) {
+        if ($m.Source -match ',') { Write-Warning "host mount $($m.Name) skipped: the source '$($m.Source)' contains a comma, which --mount cannot carry."; continue }
+        if ($m.Name -eq 'cloud-folder' -and -not (Test-CloudFolderMount -Mount $m)) { continue }
+        Initialize-HostMountSource -Mount $m -Type $type
+        $out += @('--mount', (ConvertTo-MountArgument -Mount $m))
+    }
+    return $out
+}
+
+function Show-HostProfile {
+    <# .SYNOPSIS `task devcontainer:host`: prints the resolved host profile; starts nothing. #>
+    [CmdletBinding()]
+    param([string]$DockerPath, [string]$WorkspaceFolder, [string[]]$Arguments = @())
+    $p = Resolve-HostProfile -DockerPath $DockerPath
+    Write-Host "HOST_TYPE          : $($p.Type)"
+    Write-Host "why                : $($p.Why)"
+    Write-Host "priority list      : $($p.Priority -join ',')"
+    Write-Host "engine command     : $($p.Engine)"
+    Write-Host "DCF_HOST_TYPE      : $($p.Type)"
+    Write-Host "DCF_HOST_HOME      : $($p.Home)"
+    Write-Host "DCF_HOST_SSH_AGENT : $($p.SshAgent)"
+    Write-Host "DCF_HOST_CLOUD_FOLDER: $(if ($p.CloudFolder) { $p.CloudFolder } else { '(unset)' })"
+    if (-not $WorkspaceFolder) { $WorkspaceFolder = (Get-Location).Path }
+    $machine = Get-HostMachineName
+    Write-Host "DCF_HOST_MACHINE   : $(if ($machine) { $machine } else { '(unset)' })"
+    Write-MachineSlotWarning -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments
+    if ($p.Fuse) {
+        Write-Host "DCF_HOST_FUSE      : 1 (runArgs get: $(@((Get-FuseRunArgument -Requested $true).Values) -join ' '))"
+        Write-FuseSlotWarning -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath
+    }
+    elseif ($p.FuseRequested) { Write-Host "DCF_HOST_FUSE      : 1 asked for, not granted on $($p.Type): $($p.FuseRefusal)" }
+    else { Write-Host 'DCF_HOST_FUSE      : (unset: no FUSE grant)' }
+    switch ($p.AudioRequest) {
+        'none' { Write-Host 'DCF_HOST_AUDIO     : (unset: no audio)' }
+        'unknown' { Write-Host "DCF_HOST_AUDIO     : '$env:DCF_HOST_AUDIO' is not known (none, wslg): no audio" }
+        default {
+            $refusal = Get-AudioRefusal -Type $p.Type
+            if ($refusal) { Write-Host "DCF_HOST_AUDIO     : wslg asked for, not on $($p.Type): $refusal" }
+            else { Write-Host "DCF_HOST_AUDIO     : wslg asked for: up makes the relay directory $($script:AudioSource) in the default WSL distro and mounts it at $($script:AudioTarget), empty: the microphone is off until task audio:on (none when that distro has no WSLg socket)" }
+        }
+    }
+    $r = Resolve-HostMount -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath
+    if (-not $r.Enabled) { Write-Host 'host mounts        : off (HOST_MOUNTS=false)'; return }
+    if (-not ($r.Add.Count + $r.Skip.Count)) { Write-Host 'host mounts        : none'; return }
+    foreach ($m in $r.Add) { Write-Host "host mount (add)   : $($m.Name): $(ConvertTo-MountArgument -Mount $m)" }
+    foreach ($m in $r.Skip) { Write-Host "host mount (skip)  : $($m.Name): $($m.Target) is already mounted by devcontainer.json" }
+}
+
+function Get-WorkspaceFolderVariant {
+    <#
+    .SYNOPSIS
+        The folder as given, then with the drive letter lowercased, then
+        uppercased (only for an X:\ path), without repeats. `devcontainer up`
+        labels the container with a lowercase drive letter while the folder
+        reaches the scripts with an uppercase one, and the engine's label
+        filter is case-sensitive.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder)
+
+    $variants = [System.Collections.Generic.List[string]]::new()
+    $variants.Add($WorkspaceFolder)
+    if ($WorkspaceFolder -match '^[A-Za-z]:[\\/]') {
+        $rest = $WorkspaceFolder.Substring(1)
+        foreach ($v in @(($WorkspaceFolder[0].ToString().ToLowerInvariant() + $rest), ($WorkspaceFolder[0].ToString().ToUpperInvariant() + $rest))) {
+            if (-not $variants.Contains($v)) { $variants.Add($v) }
+        }
+    }
+    return , $variants.ToArray()
+}
+
+function Get-RunningDevcontainerId {
+    <#
+    .SYNOPSIS
+        The ids of the running container(s) of a workspace, found by the
+        devcontainer.local_folder label `devcontainer up` puts on them (the
+        folder as given, else with the drive letter in the other cases); empty
+        when none runs. Throws when the engine cannot list containers.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string]$DockerPath
+    )
+
+    $WorkspaceFolder = (Resolve-Path $WorkspaceFolder).Path
+    $engine = Resolve-DockerPath -DockerPath $DockerPath
+    if (-not $engine) { $engine = 'docker' }
+    foreach ($variant in (Get-WorkspaceFolderVariant -WorkspaceFolder $WorkspaceFolder)) {
+        $ids = @(& $engine ps -q --filter "label=devcontainer.local_folder=$variant")
+        if ($LASTEXITCODE -ne 0) { throw "$engine could not list containers (exit code $LASTEXITCODE)." }
+        $ids = @($ids | Where-Object { $_ })
+        if ($ids.Count -gt 0) { return $ids }
+    }
+    return @()
+}
+
+function Stop-Devcontainer {
+    <#
+    .SYNOPSIS
+        Stops the running container(s) of a workspace through the configured
+        engine. The CLI has no stop: the container is found by the
+        devcontainer.local_folder label `devcontainer up` puts on it.
+        Nothing running = "already stopped", exit 0. Unless -Force, the
+        command in -CommandB64 (the shutdown check) first runs inside the
+        container; when it fails, the stop is refused with its exit code
+        (a check that is not installed, exit 127, gets its own message).
+        -CheckOnly is devcontainer:prepshutdown: run the check, stop nothing,
+        ignore -Force.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string]$DockerPath,
+        [string]$CommandB64,
+        [switch]$Force,
+        [switch]$CheckOnly,
+        [string]$NodeVersion,
+        [string]$CliVersion
+    )
+
+    $WorkspaceFolder = (Resolve-Path $WorkspaceFolder).Path
+    $engine = Resolve-DockerPath -DockerPath $DockerPath
+    $engineShown = if ($engine) { $engine } else { 'docker' }
+    try { $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath) }
+    catch {
+        [Console]::Error.WriteLine($_.Exception.Message)
+        [Console]::Error.WriteLine("the container engine ($engineShown) could not be reached.")
+        exit 2
+    }
+    if ($ids.Count -eq 0) {
+        if ($CheckOnly) { Write-Host "No running devcontainer for ${WorkspaceFolder}: nothing to check." }
+        else { Write-Host "No running devcontainer for ${WorkspaceFolder}: already stopped." }
+        return
+    }
+    if ($Force -and -not $CheckOnly) {
+        Write-Host 'FORCE set: skipping the shutdown check.'
+    }
+    elseif ($CommandB64) {
+        $check = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($CommandB64))
+        Write-Host "Running the shutdown check ($check); if it fails the stop is refused."
+        Invoke-DevcontainerCliProcess -Subcommand exec -WorkspaceFolder $WorkspaceFolder -CommandB64 $CommandB64 `
+            -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+        $rc = $script:CliExitCode
+        if ($rc -eq 127) {
+            [Console]::Error.WriteLine("Not stopping: the shutdown check ($check) is not installed in the container (exit 127). Define it, unset STOP_CHECK to use the default resolution, or run again with FORCE=1.")
+            exit $rc
+        }
+        if ($rc -ne 0) {
+            [Console]::Error.WriteLine("Not stopping: the shutdown check ($check) found the problems above. Fix them (shutdown-devhost skill) or run again with FORCE=1.")
+            exit $rc
+        }
+    }
+    if ($CheckOnly) {
+        Write-Host 'The shutdown check passed (or none is defined): a stop would go ahead.'
+        return
+    }
+    Write-Host "Container engine: $engineShown"
+    if ($PSCmdlet.ShouldProcess($WorkspaceFolder, "Stop container(s) $($ids -join ' ')")) {
+        & $engineShown stop @ids
+        if ($LASTEXITCODE -ne 0) {
+            [Console]::Error.WriteLine("$engineShown stop failed with exit code $LASTEXITCODE.")
+            exit $LASTEXITCODE
+        }
+    }
+}
+
+function Test-BuildSubcommand {
+    <#
+    .SYNOPSIS
+        $true for a subcommand that builds an image and so takes the build lock.
+        `features test` builds too, but takes the lock only with
+        DEVCONTAINER_BUILD_LOCK_FEATURES_TEST=true (default false): a long test
+        run would hold up every repository's rebuild.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Subcommand, [string[]]$Arguments = @())
+    if ($Subcommand -in $script:BuildSubcommands) { return $true }
+    if ($Subcommand -eq 'features' -and $Arguments.Count -gt 0 -and $Arguments[0] -eq 'test') {
+        return (Get-SettingOrEnv '' 'DEVCONTAINER_BUILD_LOCK_FEATURES_TEST' 'false') -in @('true', '1')
+    }
+    return $false
+}
+
+function Get-BuildLockStateDir {
+    <# .SYNOPSIS Where the build lock's holder and waiter files live: build-lock\ under the launcher cache (Get-LauncherCacheRoot). #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param()
+    return (Join-Path (Get-LauncherCacheRoot) 'build-lock')
+}
+
+function Get-BuildLockLabel {
+    <# .SYNOPSIS What a build is, for the waiting line: the subcommand and its flags (values left out), e.g. "up --remove-existing-container --build-no-cache". #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Subcommand, [string[]]$Arguments = @())
+    $flags = @($Arguments | Where-Object { $_ -like '-*' })
+    return (@($Subcommand) + $flags) -join ' '
+}
+
+function Test-BuildLockProcessAlive {
+    <# .SYNOPSIS $true when a process with this id runs (a holder or waiter file whose process is gone is stale and ignored). #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([int]$Id)
+    if ($Id -le 0) { return $false }
+    return [bool](Get-Process -Id $Id -ErrorAction SilentlyContinue)
+}
+
+function Read-BuildLockFile {
+    <# .SYNOPSIS A holder or waiter file as an object, or $null when it is missing, unreadable or stale (its process is gone). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    try { $o = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { return $null }
+    if (-not $o -or -not (Test-BuildLockProcessAlive -Id ([int]$o.pid))) { return $null }
+    return $o
+}
+
+function Write-BuildLockFile {
+    <# .SYNOPSIS Writes a holder or waiter file (through a temp file, so a reader never sees half of one). Best effort: a failure never stops a build. #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][hashtable]$Content)
+    if (-not $PSCmdlet.ShouldProcess($Path, 'Write build lock file')) { return }
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) -ErrorAction Stop
+        $tmp = "$Path.$PID.tmp"
+        Set-Content -LiteralPath $tmp -Value ($Content | ConvertTo-Json -Compress) -Encoding utf8 -ErrorAction Stop
+        Move-Item -LiteralPath $tmp -Destination $Path -Force -ErrorAction Stop
+    }
+    catch { Write-Verbose "build lock file $Path not written: $($_.Exception.Message)" }
+}
+
+function Get-BuildLockWaitMessage {
+    <#
+    .SYNOPSIS
+        The waiting line: who holds the lock and how many other waiters there are (every live
+        waiter but this one, whenever it arrived; the holder is not one), e.g.
+        "waiting for alpha's up --build-no-cache (started 14:02, 2 waiting)...". Without a live
+        holder file (the holder is an older launcher, or it died) it is
+        "waiting for another devcontainer build to finish...".
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)][string]$StateDir,
+        [int]$Self = $PID
+    )
+    $waiting = 0
+    foreach ($f in @(Get-ChildItem -LiteralPath $StateDir -Filter 'waiter-*.json' -File -ErrorAction SilentlyContinue)) {
+        $w = Read-BuildLockFile -Path $f.FullName
+        if ($w -and [int]$w.pid -ne $Self) { $waiting++ }
+    }
+    $holder = Read-BuildLockFile -Path (Join-Path $StateDir 'holder.json')
+    if ($holder -and [int]$holder.pid -ne $Self) {
+        $at = ([datetimeoffset]::Parse([string]$holder.started, [cultureinfo]::InvariantCulture)).LocalDateTime.ToString('HH:mm')
+        $tail = if ($waiting -gt 0) { ", $waiting waiting" } else { '' }
+        return "waiting for $($holder.repo)'s $($holder.subcommand) (started $at$tail)..."
+    }
+    if ($waiting -gt 0) { return "waiting for another devcontainer build to finish ($waiting waiting)..." }
+    return 'waiting for another devcontainer build to finish...'
+}
+
+function Get-EngineBuildxVersion {
+    <# .SYNOPSIS The first x.y.z that `<engine> buildx version` prints, or $null when it fails or prints none (the same probe @devcontainers/cli makes). #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][string]$Exe)
+    try { $out = (& $Exe buildx version 2> $null) -join "`n" }
+    catch { return $null }
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $m = [regex]::Match("$out", '([0-9]+)\.([0-9]+)\.([0-9]+)')
+    if ($m.Success) { return $m.Value }
+    return $null
+}
+
+function Get-BuildLockSkipReason {
+    <#
+    .SYNOPSIS
+        Why this engine needs no build lock, or $null when it does. @devcontainers/cli builds the
+        Feature content with BuildKit build contexts when `<engine> buildx version` reports 0.8.0
+        or later; then there is no shared `dev_container_feature_content_temp` image and builds of
+        different repositories cannot collide. wslc always keeps the lock, as does an engine that
+        cannot be resolved or asked.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$DockerPath)
+    try { $engine = Resolve-DockerPath -DockerPath $DockerPath }
+    catch { return $null }
+    $exe = if ($engine) { $engine } else { 'docker' }
+    # Split on both separators: [IO.Path] on Linux or macOS leaves a Windows path whole.
+    $leaf = [IO.Path]::GetFileNameWithoutExtension(($exe -split '[\\/]')[-1]).ToLowerInvariant()
+    if ($leaf -eq 'wslc') { return $null }
+    $v = Get-EngineBuildxVersion -Exe $exe
+    if (-not $v) { return $null }
+    if ([version]$v -lt [version]'0.8.0') { return $null }
+    return "$leaf builds with BuildKit build contexts (buildx $v), so builds of different repositories cannot collide"
+}
+
+function Enter-DevcontainerBuildLock {
+    <#
+    .SYNOPSIS
+        Takes the host-wide build lock, waiting for another devcontainer
+        build to finish first. Returns the held mutex for
+        Exit-DevcontainerBuildLock, or $null when no lock is taken
+        (DEVCONTAINER_BUILD_LOCK=0, or an engine with BuildKit build contexts).
+
+    .DESCRIPTION
+        Why: when the engine has no BuildKit build context (wslc), the
+        @devcontainers/cli tags the Feature content image with the fixed name
+        `dev_container_feature_content_temp` for every repository, so two
+        builds at once overwrite each other's image and the first fails with
+        `"/tmp/build-features/<feature>_N": not found`. With BuildKit build
+        contexts (Docker with buildx 0.8.0 or later) that image is never made,
+        so the lock is skipped there with one line saying why;
+        DEVCONTAINER_BUILD_LOCK=1 keeps it on every engine, =0 turns it off.
+
+        A named mutex rather than a lock file: the operating system releases
+        it when the holder dies, so a crash can leave no stale lock behind,
+        and an abandoned mutex (the holder died without releasing it) counts
+        as acquired. The mutex belongs to the thread that took it, so enter
+        and exit in the same script, as Invoke-DevcontainerCli does.
+
+        Beside it, in StateDir, the holder writes holder.json (its pid, the
+        repository's folder name, the subcommand and its flags, the start
+        time) and each waiter a waiter-<pid>.json, removed when it stops
+        waiting; a file whose process is gone is ignored. A waiter's line
+        names the holder and how many other waiters there are, and is
+        printed again when that changes. The mutex is not first-come, so the
+        count is of every other waiter, not a place in a queue.
+
+    .PARAMETER Name
+        Mutex name; the default is shared by every repository on the host.
+    #>
+    [CmdletBinding()]
+    param(
+        [string]$Name = $script:BuildLockName,
+        [string]$WorkspaceFolder = '.',
+        [string]$Subcommand = 'up',
+        [string[]]$Arguments = @(),
+        [string]$DockerPath,
+        [string]$StateDir = (Get-BuildLockStateDir)
+    )
+
+    $setting = Get-SettingOrEnv '' 'DEVCONTAINER_BUILD_LOCK'
+    if ($setting -eq '0') { return $null }
+    if ($setting -ne '1') {
+        $why = Get-BuildLockSkipReason -DockerPath $DockerPath
+        if ($why) {
+            Write-Host "build lock skipped: $why (DEVCONTAINER_BUILD_LOCK=1 keeps it)."
+            return $null
+        }
+    }
+
+    $mutex = [System.Threading.Mutex]::new($false, $Name)
+    $waiterFile = Join-Path $StateDir "waiter-$PID.json"
+    $registered = $false
+    $shown = ''
+    try {
+        while ($true) {
+            try {
+                # 500 ms slices, not an endless wait, so Ctrl+C is honoured while waiting.
+                $acquired = $mutex.WaitOne($(if ($registered) { 500 } else { 0 }))
+            }
+            catch [System.Threading.AbandonedMutexException] {
+                # The holder died without releasing; the mutex is now ours.
+                $acquired = $true
+            }
+            if ($acquired) { break }
+            if (-not $registered) {
+                $since = [datetime]::UtcNow
+                Write-BuildLockFile -Path $waiterFile -Content @{ pid = $PID; started = $since.ToString('o') }
+                $registered = $true
+            }
+            $line = Get-BuildLockWaitMessage -StateDir $StateDir -Self $PID
+            if ($line -ne $shown) {
+                Write-Host $line
+                $shown = $line
+            }
+        }
+    }
+    finally {
+        if ($registered) { Remove-Item -LiteralPath $waiterFile -Force -ErrorAction SilentlyContinue }
+    }
+
+    $folder = "$WorkspaceFolder".TrimEnd('\', '/')
+    try { $folder = (Resolve-Path -LiteralPath $folder -ErrorAction Stop).Path } catch { Write-Verbose "workspace folder kept as given: $folder" }
+    $repo = ($folder -split '[\\/]')[-1]
+    $script:BuildLockHolderFile = Join-Path $StateDir 'holder.json'
+    Write-BuildLockFile -Path $script:BuildLockHolderFile -Content @{
+        pid = $PID; repo = $repo; subcommand = (Get-BuildLockLabel -Subcommand $Subcommand -Arguments $Arguments)
+        started = [datetime]::UtcNow.ToString('o')
+    }
+    return $mutex
+}
+
+function Exit-DevcontainerBuildLock {
+    <# .SYNOPSIS Releases the lock Enter-DevcontainerBuildLock returned (a $null is ignored), removing its holder file first. #>
+    [CmdletBinding()]
+    param($Lock)
+    if (-not $Lock) { return }
+    try {
+        $file = $script:BuildLockHolderFile
+        if ($file) {
+            $script:BuildLockHolderFile = $null
+            $h = Read-BuildLockFile -Path $file
+            if ($h -and [int]$h.pid -eq $PID) { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+        }
+        $Lock.ReleaseMutex()
+    }
+    finally { $Lock.Dispose() }
+}
+
+# --------------------------------------------------------- engine wait ----
+# Right after a rebuild or an engine restart the engine may not answer for a moment, and
+# `devcontainer up` then fails inside ("Command failed: docker ps -q -a --filter label=...")
+# with the engine's own stderr hidden by @devcontainers/cli. So the engine subcommands wait for
+# it first, and a failed up or build asks it once more and prints what it says.
+
+function Test-EngineSubcommand {
+    <# .SYNOPSIS $true for a subcommand that talks to the container engine (it waits for the engine first). #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([Parameter(Mandatory)][string]$Subcommand)
+    return ($Subcommand -in $script:EngineSubcommands)
+}
+
+function Get-ContainerEngineCheck {
+    <#
+    .SYNOPSIS
+        The command that asks the engine whether it answers: @{ Exe; Arguments; Shown }.
+        Docker (and podman) answer `info`, which fails while the daemon is down; any other
+        engine (wslc has no `info`) is asked `ps -q`, which the launcher already relies on
+        (Get-RunningDevcontainerId). Exe is the engine the CLI gets as --docker-path, so the
+        check asks what the CLI will use (for windows-wsl-docker driven from Windows that is
+        the docker CLI on PATH, not `wsl -e docker`).
+    #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+    $engine = Resolve-DockerPath -DockerPath $DockerPath
+    $exe = if ($engine) { $engine } else { 'docker' }
+    $leaf = [System.IO.Path]::GetFileNameWithoutExtension($exe)
+    $checkArgs = if ($leaf -in 'docker', 'podman') { @('info') } else { @('ps', '-q') }
+    return [pscustomobject]@{ Exe = $exe; Arguments = [string[]]$checkArgs; Shown = "$exe $($checkArgs -join ' ')"; OnPath = (-not $engine) }
+}
+
+function Test-ContainerEngineResponding {
+    <# .SYNOPSIS $true when the engine the CLI will use answers (one check: Test-DockerResponding for docker on PATH, else the engine's own check). #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param([string]$DockerPath)
+    $check = Get-ContainerEngineCheck -DockerPath $DockerPath
+    if ($check.OnPath) { return [bool](Test-DockerResponding) }
+    $checkArgs = $check.Arguments
+    & $check.Exe @checkArgs *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Get-ContainerEngineError {
+    <# .SYNOPSIS Runs the engine check once and returns its stderr (empty when it answers; '(no message)' when it fails silently). #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$DockerPath)
+    $check = Get-ContainerEngineCheck -DockerPath $DockerPath
+    $checkArgs = $check.Arguments
+    $lines = @()
+    try {
+        $lines = @(& $check.Exe @checkArgs 2>&1 | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+        $rc = $LASTEXITCODE
+    }
+    catch { return $_.Exception.Message }
+    if ($rc -eq 0) { return '' }
+    if ($lines.Count -eq 0) { return "(no message; $($check.Shown) exited with code $rc)" }
+    return ($lines -join ' ')
+}
+
+function Get-ContainerEngineStartHint {
+    <# .SYNOPSIS How to start the engine of a host type, in one sentence. #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([string]$Type)
+    switch ($Type) {
+        'windows-docker' { return 'Start Docker Desktop and wait until it says the engine is running.' }
+        'macos' { return 'Start Docker Desktop and wait until it says the engine is running.' }
+        'windows-wsl-docker' { return 'Start the Docker Engine in the WSL distro (for example: wsl -e sudo service docker start).' }
+        'windows-wslc' { return 'Check that WSL runs (wsl --status) and that `wslc ps` answers; after a "read-only file system" error, task devcontainer:reset-storage.' }
+        'linux' { return 'Start the Docker daemon (for example: sudo systemctl start docker).' }
+    }
+    return 'Start the container engine.'
+}
+
+function Get-ContainerEngineHostType {
+    # The host type for a hint; never throws (a hint must not hide the engine's error).
+    try { return (Get-CachedHostType).Type } catch { return '' }
+}
+
+function Wait-ContainerEngine {
+    <#
+    .SYNOPSIS
+        Waits until the container engine answers, before a subcommand that needs it.
+    .DESCRIPTION
+        One check when the engine answers (the healthy path). Otherwise prints
+        "waiting for the container engine to answer..." once and checks again every second
+        for DEVCONTAINER_ENGINE_WAIT seconds (default 60; 0 = no wait, no check), then throws
+        naming the engine, its own error and how to start it.
+    #>
+    [CmdletBinding()]
+    param([string]$DockerPath, [string]$Seconds)
+    $text = Get-SettingOrEnv $Seconds 'DEVCONTAINER_ENGINE_WAIT' '60'
+    $limit = 0
+    if (-not [int]::TryParse($text.Trim(), [ref]$limit) -or $limit -lt 0) {
+        throw "DEVCONTAINER_ENGINE_WAIT must be a whole number of seconds (0 = no wait), not '$text'."
+    }
+    if ($limit -eq 0) { return }
+    if (Test-ContainerEngineResponding -DockerPath $DockerPath) { return }
+    Write-Host 'waiting for the container engine to answer...'
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    # A count as well as the clock: a slow check must not stretch the wait, and a test's
+    # Start-Sleep that returns at once must still end it.
+    for ($i = 0; $i -lt $limit -and $watch.Elapsed.TotalSeconds -lt $limit; $i++) {
+        Start-Sleep -Seconds 1
+        if (Test-ContainerEngineResponding -DockerPath $DockerPath) { return }
+    }
+    $check = Get-ContainerEngineCheck -DockerPath $DockerPath
+    $why = Get-ContainerEngineError -DockerPath $DockerPath
+    if (-not $why) { $why = '(it answers only now)' }
+    $hint = Get-ContainerEngineStartHint -Type (Get-ContainerEngineHostType)
+    throw "the container engine ($($check.Exe)) did not answer within $limit s ($($check.Shown)): $why $hint Then run the task again. DEVCONTAINER_ENGINE_WAIT sets how long to wait (seconds; 0 = no wait)."
+}
+
+function Write-ContainerEngineDiagnosis {
+    <#
+    .SYNOPSIS
+        After a failed up or build: asks the engine once and prints, on stderr, what it says
+        (@devcontainers/cli hides the engine's stderr, so "Command failed: docker ps ..." alone
+        says nothing about why).
+    #>
+    [CmdletBinding()]
+    param([string]$DockerPath)
+    try {
+        $check = Get-ContainerEngineCheck -DockerPath $DockerPath
+        $why = Get-ContainerEngineError -DockerPath $DockerPath
+    }
+    catch {
+        [Console]::Error.WriteLine("the container engine could not be asked: $($_.Exception.Message)")
+        return
+    }
+    if ($why) {
+        [Console]::Error.WriteLine("the container engine ($($check.Exe)) does not answer ($($check.Shown)): $why")
+        [Console]::Error.WriteLine((Get-ContainerEngineStartHint -Type (Get-ContainerEngineHostType)))
+        return
+    }
+    [Console]::Error.WriteLine("the container engine ($($check.Exe)) answers now ($($check.Shown)). If the error above names an engine command (Command failed: docker ...), the engine did not answer for a moment: run the task again.")
+}
+
+function Get-DevcontainerCliInvocation {
+    <#
+    .SYNOPSIS
+        The program and arguments of one @devcontainers/cli call (Exe, Arguments), with the host
+        mounts for `up`, --docker-path and the DCF_HOST_* environment set up as for every call.
+        Invoke-DevcontainerCliProcess runs it on the console; the cloud-folder login reads its output.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Subcommand,
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string[]]$Arguments = @(),
+        [string]$CommandB64,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath
+    )
+
+    $WorkspaceFolder = (Resolve-Path $WorkspaceFolder).Path
+    $cliArgs = @($Subcommand)
+    # Subcommands that operate on a workspace take --workspace-folder;
+    # `features ...` and `templates ...` do not.
+    if ($Subcommand -in 'up', 'set-up', 'build', 'run-user-commands', 'read-configuration', 'outdated', 'upgrade', 'exec') {
+        $cliArgs += @('--workspace-folder', $WorkspaceFolder)
+    }
+    # Host mounts go to `up` only (and so to rebuild): `build` mounts nothing and `exec`
+    # runs in a container that exists. Initialize-HostEnvironment below sets DCF_HOST_*.
+    if ($Subcommand -eq 'up') {
+        # Audio first: its mount is added only once the bind in the default distro is there.
+        [void](Initialize-HostAudio)
+        $cliArgs += @(Get-HostMountArgument -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath)
+        Write-FuseRefusedWarning -DockerPath $DockerPath
+        Write-FuseSlotWarning -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath
+        Write-MachineSlotWarning -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments
+    }
+
+    if ($IsWindows) {
+        $nodeDir = Get-PortableNodeDir -Version $NodeVersion
+        $entrypoint = Get-DevcontainersCliEntrypoint -NodeDir $nodeDir -CliVersion $CliVersion
+        $exe = Join-Path $nodeDir 'node.exe'
+        $cliArgs = @($entrypoint) + $cliArgs
+    }
+    elseif (Get-Command devcontainer -ErrorAction SilentlyContinue) {
+        $exe = 'devcontainer'
+    }
+    else {
+        $exe = 'npx'
+        $cliArgs = @('-y', '@devcontainers/cli') + $cliArgs
+    }
+
+    # Only the subcommands that drive an engine take --docker-path;
+    # `features ...`, `templates ...` and `outdated` reject it.
+    if ($Subcommand -in 'up', 'set-up', 'build', 'run-user-commands', 'read-configuration', 'upgrade', 'exec') {
+        $engine = Resolve-DockerPath -DockerPath $DockerPath
+        if ($engine) {
+            Write-Host "Container engine: $engine"
+            $cliArgs += @('--docker-path', $engine)
+        }
+        # DCF_HOST_* go into this process's environment, which the CLI inherits;
+        # a repository maps them into the container with containerEnv.
+        [void](Initialize-HostEnvironment -DockerPath $DockerPath)
+    }
+
+    if ($CommandB64) {
+        if ($Subcommand -ne 'exec') { throw "-CommandB64 is only meaningful with -Subcommand exec (got '$Subcommand')." }
+        $decoded = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($CommandB64))
+        $cliArgs += @('bash', '-lc', $decoded)
+    }
+    else {
+        $cliArgs += $Arguments
+    }
+    return [pscustomobject]@{ Exe = $exe; Arguments = [string[]]$cliArgs }
+}
+
+function Invoke-DevcontainerCliProcess {
+    <# .SYNOPSIS One @devcontainers/cli call; its exit code is left in $script:CliExitCode (no throw for a failing CLI). #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Subcommand,
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string[]]$Arguments = @(),
+        [string]$CommandB64,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath,
+        [string]$InputFile
+    )
+
+    $inv = Get-DevcontainerCliInvocation -Subcommand $Subcommand -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments `
+        -CommandB64 $CommandB64 -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+    $exe = $inv.Exe
+    $cliArgs = $inv.Arguments
+
+    # Not returned: the CLI's own output must reach the console (a pipeline
+    # would capture it, and Out-Host would take away an interactive terminal).
+    # -InputFile: the file's text goes to the CLI's stdin (ssh-key-import), never into its arguments.
+    if ($InputFile) { Get-Content -LiteralPath $InputFile -Raw | & $exe @cliArgs } else { & $exe @cliArgs }
+    $script:CliExitCode = $LASTEXITCODE
+}
+
+function Write-GeneralPurposeKeyWarning {
+    <#
+    .SYNOPSIS
+        Warnings (never a refusal) when the key about to be imported looks like a general-purpose key.
+    .DESCRIPTION
+        A default file name (id_ed25519, id_rsa, ...), or a public key that also opens something on
+        this host: listed in ~/.ssh/authorized_keys, or the same as another ~/.ssh/*.pub. The public
+        half is FILE.pub, or derived with `ssh-keygen -y` only for a key with no passphrase (a wrong
+        passphrase is given, so a protected key fails instead of prompting, and is skipped). Prints
+        fingerprints, never key material.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$KeyFile, [string]$Label = 'ssh-key-import')
+    $name = Split-Path -Leaf $KeyFile
+    if ($name -in 'id_ed25519', 'id_ecdsa', 'id_rsa', 'id_dsa', 'id_ed25519_sk', 'id_ecdsa_sk') {
+        Write-Warning "${Label}: $name is the default name of a general-purpose key. Import only a dedicated signing key (one key per purpose and per container, named <repo>-<container>-sign) that opens nothing else; task ssh-agent:key:new inside the container makes one that never leaves it."
+    }
+    $keygen = Get-Command ssh-keygen -ErrorAction SilentlyContinue
+    $pub = $null
+    if (Test-Path -LiteralPath "$KeyFile.pub" -PathType Leaf) { $pub = Get-Content -LiteralPath "$KeyFile.pub" -TotalCount 1 }
+    elseif ($keygen) {
+        $derived = $null | & $keygen.Source -y -P 'not-the-passphrase' -f $KeyFile 2>$null
+        if ($LASTEXITCODE -eq 0 -and $derived) { $pub = @($derived)[0] }
+    }
+    $blob = if ($pub) { @(([string]$pub) -split '\s+')[1] } else { $null }
+    if (-not $blob) { return }
+    $fp = ''
+    if ($keygen) {
+        $tmp = [System.IO.Path]::GetTempFileName()
+        try {
+            [System.IO.File]::WriteAllText($tmp, "$pub`n")
+            $l = & $keygen.Source -l -f $tmp 2>$null
+            if ($LASTEXITCODE -eq 0 -and $l) { $fp = (@(([string]@($l)[0]) -split '\s+'))[1] }
+        }
+        finally { Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }
+    }
+    $userHome = if ($env:HOME) { $env:HOME } else { $env:USERPROFILE }
+    if (-not $userHome) { return }
+    $sshDir = Join-Path $userHome '.ssh'
+    $hit = $null
+    $authorized = Join-Path $sshDir 'authorized_keys'
+    if (Test-Path -LiteralPath $authorized -PathType Leaf) {
+        foreach ($line in Get-Content -LiteralPath $authorized) {
+            if (@($line -split '\s+') -contains $blob) { $hit = 'appears in ~/.ssh/authorized_keys (it logs in to this host)'; break }
+        }
+    }
+    if (-not $hit -and (Test-Path -LiteralPath $sshDir -PathType Container)) {
+        $own = if (Test-Path -LiteralPath "$KeyFile.pub") { (Resolve-Path -LiteralPath "$KeyFile.pub").Path } else { $null }
+        foreach ($p in Get-ChildItem -LiteralPath $sshDir -Filter '*.pub' -File) {
+            if ($own -and $p.FullName -eq $own) { continue }
+            $other = @(((Get-Content -LiteralPath $p.FullName -TotalCount 1) -split '\s+'))[1]
+            if ($other -eq $blob) { $hit = "is the same key as ~/.ssh/$($p.Name)"; break }
+        }
+    }
+    if ($hit) {
+        $shown = if ($fp) { " ($fp)" } else { '' }
+        Write-Warning "${Label}: the public key of $name$shown $hit, so it is a general-purpose key. A key that also opens GitHub, servers or other repos must not live in a container volume: import a dedicated signing key instead (registered at GitHub as a signing key only)."
+    }
+}
+
+function Import-SshKey {
+    <#
+    .SYNOPSIS
+        The opt-in key mode's one-shot import (task devcontainer:ssh-key-import): streams a
+        private key file of this host into the running container's ssh-agent key volume.
+    .DESCRIPTION
+        The key goes through `devcontainer exec` on stdin (ssh-agent-setup key-stdin), never as an
+        argument, so it is not in a process list or a log; the .pub beside it follows when it
+        exists; then the Feature loads the keys. The container refuses, before reading anything,
+        when key mode is off. Throws with a clear message when the file is missing, no container
+        runs, or the container refuses. Nothing is left running on the host.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string]$KeyFile,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath
+    )
+    if (-not $KeyFile -or -not (Test-Path -LiteralPath $KeyFile -PathType Leaf)) {
+        throw "ssh-key-import: FILE=<path of a private key on this host> is required, and '$KeyFile' is not a file."
+    }
+    Write-Warning "ssh-key-import: deprecated: it puts the key in the ssh-agent Feature's key volume, which goes in ssh-agent 2.0; use task devcontainer:openbao-ssh-import FILE=<key> (the key goes into OpenBao; the openbao Feature in the container, unsealed and logged in)."
+    Write-GeneralPurposeKeyWarning -KeyFile $KeyFile
+    $folder = (Resolve-Path $WorkspaceFolder).Path
+    $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $folder -DockerPath $DockerPath)
+    if ($ids.Count -eq 0) { throw "No running devcontainer for $folder. Start it with: task dc:start" }
+    $name = Split-Path -Leaf $KeyFile
+    $common = @{ Subcommand = 'exec'; WorkspaceFolder = $folder; NodeVersion = $NodeVersion; CliVersion = $CliVersion; DockerPath = $DockerPath }
+    Invoke-DevcontainerCliProcess @common -Arguments @('ssh-agent-setup', 'key-stdin', $name) -InputFile $KeyFile
+    if ($script:CliExitCode -ne 0) {
+        throw "ssh-key-import: the container refused or failed (exit $($script:CliExitCode), see above). Key mode must be on there: Feature option keyMode: true, or SSH_AGENT_MODE=key at task devcontainer:up; the ssh-agent Feature must be installed."
+    }
+    if (Test-Path -LiteralPath "$KeyFile.pub" -PathType Leaf) {
+        Invoke-DevcontainerCliProcess @common -Arguments @('ssh-agent-setup', 'key-stdin', "$name.pub") -InputFile "$KeyFile.pub"
+        if ($script:CliExitCode -ne 0) { Write-Warning 'ssh-key-import: the .pub could not be stored (the private key was).' }
+    }
+    Invoke-DevcontainerCliProcess @common -Arguments @('ssh-agent-setup', 'key-load')
+    if ($script:CliExitCode -ne 0) { throw "ssh-key-import: loading the keys failed (exit $($script:CliExitCode))." }
+}
+
+function Import-OpenBaoSshKey {
+    <#
+    .SYNOPSIS
+        The one-shot import of a private key of this host into OpenBao (task
+        devcontainer:openbao-ssh-import), which replaces ssh-key-import.
+    .DESCRIPTION
+        The key goes through `devcontainer exec` on stdin, never as an argument, into the openbao
+        Feature's `openbao-ssh import --from file` (task openbao:ssh:import FROM=file), which
+        stores it as ssh/<name> and adds its line to the repository's .devcontainer/allowed_signers.
+        The container refuses when the server is sealed or nobody is logged in, before storing
+        anything. Throws with a clear message when the file is missing, no container runs, or the
+        container refuses. Nothing is left running on the host.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string]$KeyFile,
+        [string]$Name,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath
+    )
+    if (-not $KeyFile -or -not (Test-Path -LiteralPath $KeyFile -PathType Leaf)) {
+        throw "openbao-ssh-import: FILE=<path of a private key on this host> is required, and '$KeyFile' is not a file."
+    }
+    if (-not $Name) { $Name = Split-Path -Leaf $KeyFile }
+    Write-GeneralPurposeKeyWarning -KeyFile $KeyFile -Label 'openbao-ssh-import'
+    $folder = (Resolve-Path $WorkspaceFolder).Path
+    $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $folder -DockerPath $DockerPath)
+    if ($ids.Count -eq 0) { throw "No running devcontainer for $folder. Start it with: task dc:start" }
+    $common = @{ Subcommand = 'exec'; WorkspaceFolder = $folder; NodeVersion = $NodeVersion; CliVersion = $CliVersion; DockerPath = $DockerPath }
+    Invoke-DevcontainerCliProcess @common -Arguments @('openbao-ssh', 'import', '--from', 'file', '--name', $Name) -InputFile $KeyFile
+    if ($script:CliExitCode -ne 0) {
+        throw "openbao-ssh-import: the container refused or failed (exit $($script:CliExitCode), see above). It needs the openbao Feature (1.3.0 or later), its server unsealed and a login (task openbao:login in the container); a key with a passphrase is imported inside the container instead (task openbao:ssh:import FROM=file FILE=<path>), where ssh-keygen can ask for it."
+    }
+}
+
+# ------------------------------------------------------ cloud-folder login ----
+# task cloud-folder:login from the workstation (devcontainer:cloud-folder-login): the cloud-folder
+# Feature's sign-in, which runs `rclone authorize "onedrive"` in the container, reached from this
+# workstation's browser. Microsoft sends the browser after the sign-in to the fixed
+# http://localhost:53682/ (rclone's app registration allows only that address), which here does not
+# reach the container. Three routes, as in the bash twin (devcontainer-cli.sh, "cloud-folder login"):
+# the relay (default: a listener on 127.0.0.1:53682 for the sign-in only, each request relayed into
+# the container through `<engine> exec -i` and bash's /dev/tcp), --paste, and --workstation-rclone.
+# Test hooks: DCF_CLOUD_FOLDER_LOGIN_PORT, DCF_CLOUD_FOLDER_LOGIN_CONTAINER_PORT, DCF_BROWSER,
+# DCF_RCLONE_DOWNLOADS.
+# The cloud-folder Feature's rcloneVersion default (CloudFolderLogin.Tests.ps1 checks it matches).
+$script:CloudFolderRcloneDefault = '1.75.2'
+
+function Get-LauncherCacheRoot {
+    <# .SYNOPSIS The launcher's download cache: %LOCALAPPDATA%\devcontainer-features on Windows, else ${XDG_CACHE_HOME:-~/.cache}/devcontainer-features (as the bash twin). #>
+    [CmdletBinding()]
+    param()
+    if ($IsWindows) { return (Join-Path $env:LOCALAPPDATA 'devcontainer-features') }
+    $base = if ($env:XDG_CACHE_HOME) { $env:XDG_CACHE_HOME } else { Join-Path $HOME '.cache' }
+    return (Join-Path $base 'devcontainer-features')
+}
+
+function Get-CloudFolderRcloneVersion {
+    <# .SYNOPSIS The cloud-folder rcloneVersion in the repository's devcontainer.json, else the Feature's default; "latest" asks the publisher. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder)
+    $v = ''
+    $file = Get-DevcontainerConfigFile -WorkspaceFolder $WorkspaceFolder
+    if ($file) {
+        $text = ConvertTo-JsonWithoutComment -Text (Get-Content -LiteralPath $file -Raw)
+        $m = [regex]::Match($text, '"rcloneVersion"\s*:\s*"([^"]*)"')
+        if ($m.Success) { $v = $m.Groups[1].Value }
+    }
+    $v = $v -replace '^v', ''
+    if ($v -eq 'latest') {
+        $base = Get-SettingOrEnv '' 'DCF_RCLONE_DOWNLOADS' 'https://downloads.rclone.org'
+        $file = [System.IO.Path]::GetTempFileName()
+        try {
+            Invoke-DcfDownload -Uri "$base/version.txt" -OutFile $file
+            $m = [regex]::Match((Get-Content -LiteralPath $file -Raw), 'rclone v?([0-9][0-9.]*)')
+            if (-not $m.Success) { throw 'cloud-folder-login: rcloneVersion latest: the publisher did not say which version that is.' }
+            $v = $m.Groups[1].Value
+        }
+        finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+    }
+    if (-not $v) { $v = $script:CloudFolderRcloneDefault }
+    return $v
+}
+
+function Get-WorkstationRclone {
+    <#
+    .SYNOPSIS
+        The rclone release for this workstation in the launcher cache (downloaded once, verified
+        against the release's SHA256SUMS); returns the executable's path. Throws on a mismatch.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Version)
+    $os = if ($IsWindows) { 'windows' } elseif ($IsMacOS) { 'osx' } else { 'linux' }
+    $arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+        'X64' { 'amd64' } 'Arm64' { 'arm64' } default { throw "cloud-folder-login: no rclone build for $_ here (amd64, arm64)." }
+    }
+    $exeName = if ($IsWindows) { 'rclone.exe' } else { 'rclone' }
+    $dir = Join-Path (Get-LauncherCacheRoot) "rclone/v$Version"
+    $exe = Join-Path $dir $exeName
+    if (Test-Path -LiteralPath $exe -PathType Leaf) { return $exe }
+
+    $asset = "rclone-v$Version-$os-$arch.zip"
+    $base = (Get-SettingOrEnv '' 'DCF_RCLONE_DOWNLOADS' 'https://downloads.rclone.org') + "/v$Version"
+    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) "dcf-rclone-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    Write-Host "cloud-folder-login: downloading rclone v$Version ($asset, once; cached under $dir)..."
+    try {
+        try {
+            Invoke-DcfDownload -Uri "$base/$asset" -OutFile (Join-Path $tmp $asset)
+            # Saved to a file and read as text: for this file Invoke-WebRequest's .Content is bytes.
+            Invoke-DcfDownload -Uri "$base/SHA256SUMS" -OutFile (Join-Path $tmp 'SHA256SUMS')
+        }
+        catch { throw "cloud-folder-login: could not download rclone v$Version from $base ($($_.Exception.Message))" }
+        $sums = Get-Content -LiteralPath (Join-Path $tmp 'SHA256SUMS') -Raw
+        $line = $sums -split "`n" | Where-Object { $_ -match ('^\s*[0-9a-fA-F]{64}\s+' + [regex]::Escape($asset) + '\s*$') } | Select-Object -First 1
+        if (-not $line) { throw "cloud-folder-login: $asset is not in the release's SHA256SUMS." }
+        $expected = ($line.Trim() -split '\s+')[0].ToLowerInvariant()
+        $actual = (Get-FileHash -LiteralPath (Join-Path $tmp $asset) -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $expected) { throw "cloud-folder-login: SHA-256 mismatch for $asset (expected $expected, got $actual); nothing kept." }
+        Expand-Archive -LiteralPath (Join-Path $tmp $asset) -DestinationPath (Join-Path $tmp 'x') -Force
+        $found = Join-Path $tmp "x/rclone-v$Version-$os-$arch/$exeName"
+        if (-not (Test-Path -LiteralPath $found -PathType Leaf)) { throw "cloud-folder-login: $asset has no rclone-v$Version-$os-$arch/$exeName." }
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        Move-Item -LiteralPath $found -Destination $exe -Force
+        if (-not $IsWindows) { & chmod 0755 $exe }
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    return $exe
+}
+
+function Open-Browser {
+    <# .SYNOPSIS Opens the address in the default browser (DCF_BROWSER: another command), without waiting. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Url)
+    try {
+        if ($env:DCF_BROWSER) { Start-Process -FilePath $env:DCF_BROWSER -ArgumentList @($Url) | Out-Null }
+        else { Start-Process -FilePath $Url | Out-Null }
+    }
+    catch { Write-Host "cloud-folder-login: open this address in your browser: $Url" }
+}
+
+function Invoke-CloudFolderRelayRequest {
+    <#
+    .SYNOPSIS
+        One request of the browser: read from the workstation listener, made HTTP/1.0 with
+        Connection: close (so rclone answers and closes), written into the container through
+        `<engine> exec -i <id> bash -c` to /dev/tcp/127.0.0.1/<port>, and the answer copied back.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Net.Sockets.TcpClient]$Client,
+        [Parameter(Mandatory)][string]$Engine,
+        [Parameter(Mandatory)][string]$ContainerId,
+        [Parameter(Mandatory)][int]$ContainerPort
+    )
+    try {
+        $stream = $Client.GetStream()
+        $stream.ReadTimeout = 10000
+        $buf = [byte[]]::new(65536)
+        $data = [System.IO.MemoryStream]::new()
+        $ascii = [System.Text.Encoding]::ASCII
+        while ($data.Length -lt 65536) {
+            $n = $stream.Read($buf, 0, $buf.Length)
+            if ($n -le 0) { break }
+            $data.Write($buf, 0, $n)
+            if ($ascii.GetString($data.ToArray()).Contains("`r`n`r`n")) { break }
+        }
+        $head = ($ascii.GetString($data.ToArray()) -split "`r`n`r`n", 2)[0] -split "`r`n"
+        $first = $head[0] -split ' '
+        if ($first.Count -lt 2) { return }
+        $lines = @("$($first[0]) $($first[1]) HTTP/1.0")
+        $lines += @($head | Select-Object -Skip 1 | Where-Object { $_ -and (($_ -split ':', 2)[0].Trim().ToLowerInvariant() -notin 'connection', 'keep-alive') })
+        $lines += 'Connection: close'
+        $request = $ascii.GetBytes(($lines -join "`r`n") + "`r`n`r`n")
+
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($Engine)
+        foreach ($a in @('exec', '-i', $ContainerId, 'bash', '-c', "exec 3<>/dev/tcp/127.0.0.1/$ContainerPort || exit 1; cat <&3 & cat >&3; wait")) { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.CreateNoWindow = $true
+        $answer = [System.IO.MemoryStream]::new()
+        try {
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $p.StandardInput.BaseStream.Write($request, 0, $request.Length)
+            $p.StandardInput.Close()
+            $p.StandardOutput.BaseStream.CopyTo($answer)
+            [void]$p.WaitForExit(30000)
+        }
+        catch { $answer.SetLength(0) }
+        $bytes = $answer.ToArray()
+        if ($bytes.Length -eq 0) {
+            $bytes = $ascii.GetBytes("HTTP/1.0 502 Bad Gateway`r`nContent-Type: text/plain`r`n`r`nThe devcontainer did not answer (is task cloud-folder:login still running?).`n")
+        }
+        $stream.Write($bytes, 0, $bytes.Length)
+    }
+    catch { Write-Verbose "cloud-folder-login: a relayed request failed: $($_.Exception.Message)" }
+    finally { $Client.Close() }
+}
+
+function Invoke-CloudFolderLoginRelay {
+    <#
+    .SYNOPSIS
+        The relay route: listens on 127.0.0.1:53682 for the sign-in only, starts `cloud-folder-setup
+        login --relay` in the container, opens the browser at the link it prints, relays every
+        request, and closes the listener when the login ends, fails or times out. A busy port falls
+        back to the paste route. The exit code is left in $script:CliExitCode.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [Parameter(Mandatory)][string]$ContainerId,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath
+    )
+    $port = [int](Get-SettingOrEnv '' 'DCF_CLOUD_FOLDER_LOGIN_PORT' '53682')
+    $cport = [int](Get-SettingOrEnv '' 'DCF_CLOUD_FOLDER_LOGIN_CONTAINER_PORT' '53682')
+    $timeout = [int](Get-SettingOrEnv '' 'CLOUD_FOLDER_LOGIN_TIMEOUT' '600')
+    $common = @{ WorkspaceFolder = $WorkspaceFolder; NodeVersion = $NodeVersion; CliVersion = $CliVersion; DockerPath = $DockerPath }
+    $engine = Resolve-DockerPath -DockerPath $DockerPath
+    if (-not $engine) { $engine = 'docker' }
+
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $port)
+    try { $listener.Start() }
+    catch {
+        Write-Host "cloud-folder-login: port $port on this workstation is in use (another sign-in, or a local rclone?), so the browser's redirect cannot be relayed; signing in by pasting the address instead."
+        Invoke-DevcontainerCliProcess -Subcommand exec @common -Arguments @('cloud-folder-setup', 'login')
+        return
+    }
+    $proc = $null
+    try {
+        Write-Host "cloud-folder-login: relaying 127.0.0.1:$port on this workstation into the devcontainer for the sign-in (closed when it ends, at the latest after ${timeout}s)."
+        $inv = Get-DevcontainerCliInvocation -Subcommand exec @common -Arguments @('env', "CLOUD_FOLDER_LOGIN_TIMEOUT=$timeout", 'cloud-folder-setup', 'login', '--relay')
+        $psi = [System.Diagnostics.ProcessStartInfo]::new($inv.Exe)
+        foreach ($a in $inv.Arguments) { $psi.ArgumentList.Add($a) }
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $proc.StandardInput.Close()
+        # The container's login stops at the same timeout; this one is the backstop.
+        $deadline = [datetime]::UtcNow.AddSeconds($timeout + 15)
+        $opened = $false
+        $next = $proc.StandardOutput.ReadLineAsync()
+        while ($true) {
+            if ($next.IsCompleted) {
+                $line = $next.Result
+                if ($null -eq $line) { break }
+                Write-Host $line
+                if (-not $opened -and $line -match 'sign-in URL: (http://\S+)') {
+                    $url = $Matches[1] -replace ":$cport/", ":$port/"
+                    Write-Host "cloud-folder-login: opening the sign-in in your browser: $url"
+                    Open-Browser -Url $url
+                    $opened = $true
+                }
+                $next = $proc.StandardOutput.ReadLineAsync()
+                continue
+            }
+            if ($listener.Pending()) {
+                Invoke-CloudFolderRelayRequest -Client $listener.AcceptTcpClient() -Engine $engine -ContainerId $ContainerId -ContainerPort $cport
+                continue
+            }
+            if ([datetime]::UtcNow -gt $deadline) {
+                Write-Host "cloud-folder-login: no sign-in within ${timeout}s; stopping."
+                try { $proc.Kill($true) } catch { Write-Verbose 'the login had ended' }
+                break
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        $proc.WaitForExit()
+        $script:CliExitCode = $proc.ExitCode
+    }
+    finally {
+        $listener.Stop()
+        if ($proc -and -not $proc.HasExited) { try { $proc.Kill($true) } catch { Write-Verbose 'the login had ended' } }
+        Write-Host "cloud-folder-login: the relay on 127.0.0.1:$port is closed."
+    }
+}
+
+function Invoke-CloudFolderLogin {
+    <#
+    .SYNOPSIS
+        task devcontainer:cloud-folder-login (and task cloud-folder:login on the workstation): the
+        cloud-folder Feature's sign-in through the running devcontainer. Arguments: none (the
+        relay), --paste, or --workstation-rclone. The exit code is left in $script:CliExitCode.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string[]]$Arguments = @(),
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath
+    )
+    $route = 'relay'
+    foreach ($a in $Arguments) {
+        switch ($a) {
+            '--paste' { $route = 'paste' }
+            '--workstation-rclone' { $route = 'workstation' }
+            default { throw "cloud-folder-login: unknown argument '$a' (--paste, --workstation-rclone)." }
+        }
+    }
+    $folder = (Resolve-Path $WorkspaceFolder).Path
+    $common = @{ WorkspaceFolder = $folder; NodeVersion = $NodeVersion; CliVersion = $CliVersion; DockerPath = $DockerPath }
+    $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $folder -DockerPath $DockerPath)
+    if ($ids.Count -eq 0) { throw "No running devcontainer for $folder. Start it with: task dc:start" }
+
+    switch ($route) {
+        'paste' { Invoke-DevcontainerCliProcess -Subcommand exec @common -Arguments @('cloud-folder-setup', 'login') }
+        'relay' { Invoke-CloudFolderLoginRelay @common -ContainerId $ids[0] }
+        'workstation' {
+            $v = Get-CloudFolderRcloneVersion -WorkspaceFolder $folder
+            $rclone = Get-WorkstationRclone -Version $v
+            Write-Host "cloud-folder-login: signing in with rclone v$v on this workstation: rclone authorize `"onedrive`" opens your browser."
+            # Its notices (the link) reach the console; its standard output, which holds the token, is kept here.
+            $out = @(& $rclone authorize onedrive)
+            $rc = $LASTEXITCODE
+            $token = $null
+            for ($i = 0; $i -lt $out.Count; $i++) {
+                if ($out[$i] -match '^Paste the following into your remote machine --->') {
+                    $token = @($out | Select-Object -Skip ($i + 1) | Where-Object { $_.Trim() } | Select-Object -First 1)[0]
+                    break
+                }
+            }
+            $out = $null
+            if ($rc -ne 0 -or -not $token -or $token -match '^<---End paste') {
+                throw "cloud-folder-login: rclone authorize did not give a token (exit $rc; its messages are above)."
+            }
+            $file = [System.IO.Path]::GetTempFileName()
+            try {
+                [System.IO.File]::WriteAllText($file, "$token`n")
+                $token = $null
+                Write-Host 'cloud-folder-login: handing the token to the devcontainer (on stdin, never as an argument).'
+                Invoke-DevcontainerCliProcess -Subcommand exec @common -Arguments @('cloud-folder-setup', 'login', '--token') -InputFile $file
+            }
+            finally { Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue }
+        }
+    }
+    if ($script:CliExitCode -eq 127) {
+        [Console]::Error.WriteLine('cloud-folder-login: the devcontainer has no cloud-folder-setup: add the cloud-folder Feature (1.3.0 or later) to its devcontainer.json and rebuild.')
+    }
+}
+
+# ------------------------------------------------------ the OpenBao key file ----
+# The openbao Feature's `unlock: keyfile` mode (docs/proposals/openbao-key-file.md, design B): on this
+# workstation one OpenBao key file per server holds unseal shares 4 and 5 and the Operator's AppRole
+# login, protected with DPAPI for the Windows account. After every `up` the launcher asks
+# `openbao-setup unlock --status` and, when the server is sealed or the token is not live, streams the
+# key file into `openbao-setup unlock --stdin`. The tasks devcontainer:openbao:unlock and
+# devcontainer:openbao:keyfile:create|rotate|export|import|forget drive the rest.
+# The contract with the Feature: only the absolute path below, through the engine's own `exec -i -u
+# <remote user>` (never `devcontainer exec`, which runs the user's profile first), secrets only on
+# stdin and written there from memory, one JSON object on stdout; exit 0 ok, 1 failed, 3 refused inside
+# an agent's job, 4 not applicable. The plain key file exists only in this process's memory.
+# Seams for tests: Protect-OpenBaoKeyFileBlob and Unprotect-OpenBaoKeyFileBlob (DPAPI is Windows-only,
+# Pester mocks them elsewhere), Read-Host (the shares and the transfer passphrase).
+$script:OpenBaoSetupPath = '/usr/local/bin/openbao-setup'
+# Fixed per launcher: a blob made by another program for this account does not open as a key file.
+$script:OpenBaoKeyFileEntropy = [System.Text.Encoding]::UTF8.GetBytes('devcontainer-features/devcontainer-cli/openbao-key-file/v1')
+$script:OpenBaoKeyFileMagic = [System.Text.Encoding]::ASCII.GetBytes("DCF-OPENBAO-KEY-FILE-1`n")
+$script:OpenBaoTransferKind = 'devcontainer-features/openbao-key-file-transfer'
+$script:OpenBaoTransferIterations = 600000
+
+function Get-OpenBaoKeyFileDir {
+    <#
+    .SYNOPSIS
+        Where the OpenBao key files live: %LOCALAPPDATA%\devcontainer-features-keys\openbao on Windows
+        (its own folder, not the launcher's download cache, which may be cleared; not roamed, not in
+        OneDrive's known-folder move), else ${XDG_DATA_HOME:-~/.local/share}/devcontainer-features-keys/openbao.
+    #>
+    [CmdletBinding()]
+    param()
+    if ($IsWindows) { return (Join-Path $env:LOCALAPPDATA 'devcontainer-features-keys\openbao') }
+    $base = if ($env:XDG_DATA_HOME) { $env:XDG_DATA_HOME } else { Join-Path $HOME '.local/share' }
+    return (Join-Path $base 'devcontainer-features-keys/openbao')
+}
+
+function Get-OpenBaoRepoName {
+    <# .SYNOPSIS The workspace folder's name, as the key file's name carries it. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder)
+    return (Split-Path -Leaf (Resolve-Path -LiteralPath $WorkspaceFolder).Path)
+}
+
+function Get-OpenBaoKeyFilePath {
+    <# .SYNOPSIS The key file of one server: <dir>\<repo>-<cluster id>.keyfile (both cut to letters, digits, dot, underscore, hyphen). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Server)
+    $r = $Repo -replace '[^A-Za-z0-9._-]', '_'
+    $s = $Server -replace '[^A-Za-z0-9._-]', '_'
+    return (Join-Path (Get-OpenBaoKeyFileDir) "$r-$s.keyfile")
+}
+
+function Find-OpenBaoKeyFile {
+    <# .SYNOPSIS The key files of a repository on this workstation (one per server), or the one of -Server; wrap the call in @(). #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Repo, [string]$Server)
+    if ($Server) {
+        $p = Get-OpenBaoKeyFilePath -Repo $Repo -Server $Server
+        if (Test-Path -LiteralPath $p -PathType Leaf) { return $p }
+        return
+    }
+    $dir = Get-OpenBaoKeyFileDir
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return }
+    $prefix = ($Repo -replace '[^A-Za-z0-9._-]', '_') + '-'
+    Get-ChildItem -LiteralPath $dir -File -Filter '*.keyfile' | Where-Object { $_.Name.StartsWith($prefix, [StringComparison]::Ordinal) } | ForEach-Object { $_.FullName }
+}
+
+function Initialize-ProtectedData {
+    <# .SYNOPSIS Loads System.Security.Cryptography.ProtectedData (DPAPI) where pwsh has not yet. #>
+    if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
+    foreach ($a in 'System.Security.Cryptography.ProtectedData', 'System.Security') {
+        try { Add-Type -AssemblyName $a -ErrorAction Stop } catch { Write-Verbose "no assembly $a" }
+        if ('System.Security.Cryptography.ProtectedData' -as [type]) { return }
+    }
+    throw 'DPAPI (System.Security.Cryptography.ProtectedData) is not available in this pwsh.'
+}
+
+function Protect-OpenBaoKeyFileBlob {
+    <# .SYNOPSIS DPAPI, scope CurrentUser, the launcher's fixed entropy. Windows only: the OpenBao key file is Windows-only for now. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    if (-not $IsWindows) { throw 'the OpenBao key file is Windows-only for now (it is protected with Windows DPAPI).' }
+    Initialize-ProtectedData
+    return , [System.Security.Cryptography.ProtectedData]::Protect($Bytes, $script:OpenBaoKeyFileEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+}
+
+function Unprotect-OpenBaoKeyFileBlob {
+    <# .SYNOPSIS The reverse of Protect-OpenBaoKeyFileBlob; fails for another Windows account or another entropy. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+    if (-not $IsWindows) { throw 'the OpenBao key file is Windows-only for now (it is protected with Windows DPAPI).' }
+    Initialize-ProtectedData
+    return , [System.Security.Cryptography.ProtectedData]::Unprotect($Bytes, $script:OpenBaoKeyFileEntropy, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+}
+
+function Save-OpenBaoKeyFile {
+    <#
+    .SYNOPSIS
+        Protects the key file's JSON (bytes, from memory) and writes it as <repo>-<server>.keyfile,
+        through a file beside it that is renamed over it, so a half-written key file never replaces a
+        good one. The folder is created (mode 0700 off Windows; on Windows %LOCALAPPDATA% is the
+        account's own). Returns the path. The caller clears its bytes.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Repo, [Parameter(Mandatory)][string]$Server, [Parameter(Mandatory)][byte[]]$Json)
+    $blob = [byte[]](Protect-OpenBaoKeyFileBlob -Bytes $Json)
+    $dir = Get-OpenBaoKeyFileDir
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        if (-not $IsWindows) { & chmod 0700 $dir }
+    }
+    $path = Get-OpenBaoKeyFilePath -Repo $Repo -Server $Server
+    $tmp = "$path.new"
+    $data = [byte[]]::new($script:OpenBaoKeyFileMagic.Length + $blob.Length)
+    [Array]::Copy($script:OpenBaoKeyFileMagic, $data, $script:OpenBaoKeyFileMagic.Length)
+    [Array]::Copy($blob, 0, $data, $script:OpenBaoKeyFileMagic.Length, $blob.Length)
+    try {
+        [System.IO.File]::WriteAllBytes($tmp, $data)
+        if (-not $IsWindows) { & chmod 0600 $tmp }
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    }
+    finally { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    return $path
+}
+
+function Read-OpenBaoKeyFile {
+    <# .SYNOPSIS The key file's JSON as bytes, in memory only; throws when the file is not a key file or does not open for this account. The caller clears the bytes. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+    $data = [System.IO.File]::ReadAllBytes($Path)
+    $m = $script:OpenBaoKeyFileMagic
+    if ($data.Length -le $m.Length -or -not [System.Linq.Enumerable]::SequenceEqual([byte[]]$data[0..($m.Length - 1)], [byte[]]$m)) {
+        throw "$Path is not an OpenBao key file."
+    }
+    $blob = [byte[]]::new($data.Length - $m.Length)
+    [Array]::Copy($data, $m.Length, $blob, 0, $blob.Length)
+    $plain = [byte[]](Unprotect-OpenBaoKeyFileBlob -Bytes $blob)
+    return , $plain
+}
+
+function ConvertTo-OpenBaoKeyFileJson {
+    <#
+    .SYNOPSIS
+        The key file's JSON in the contract's shape ({v, server, repo, created, shares[2], role_id,
+        secret_id}) as UTF-8 bytes, from the object the container sent; throws when a field is missing.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$KeyFile, [string]$Repo)
+    $shares = @($KeyFile.shares | Where-Object { $_ })
+    foreach ($f in 'server', 'role_id', 'secret_id') {
+        if (-not $KeyFile.$f) { throw "the container's answer has no key file $f." }
+    }
+    if ($shares.Count -ne 2) { throw "the container's answer has $($shares.Count) key file shares, not 2." }
+    $created = $KeyFile.created
+    if ($created -is [datetime]) { $created = $created.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    if (-not $created) { $created = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    $o = [ordered]@{
+        v = 1; server = [string]$KeyFile.server; repo = $(if ($KeyFile.repo) { [string]$KeyFile.repo } else { $Repo })
+        created = [string]$created; shares = [string[]]$shares; role_id = [string]$KeyFile.role_id; secret_id = [string]$KeyFile.secret_id
+    }
+    return , [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $o -Compress))
+}
+
+function Get-OpenBaoAgentJobVariable {
+    <# .SYNOPSIS The first of DEVHOST_JOB_CHILD, CLAUDECODE and the names in OPENBAO_AGENT_JOB_VARS (space separated) set on this workstation, else empty. #>
+    [CmdletBinding()]
+    param()
+    $names = @('DEVHOST_JOB_CHILD', 'CLAUDECODE') + @("$env:OPENBAO_AGENT_JOB_VARS" -split '[\s,]+' | Where-Object { $_ })
+    foreach ($n in $names) { if ([Environment]::GetEnvironmentVariable($n)) { return $n } }
+    return ''
+}
+
+function Resolve-DevcontainerLocalEnv {
+    <#
+    .SYNOPSIS
+        A devcontainer.json value with each ${localEnv:NAME} and ${localEnv:NAME:default} (and the
+        older ${env:...}) replaced as the devcontainers CLI does at up: NAME from this process's
+        environment, else the default (the part after NAME's colon, up to the next one), else empty.
+        Any other ${...} is left as it is. `devcontainer up` writes the devcontainer.metadata label
+        unresolved, so a value read from it needs this before it reaches the engine.
+    #>
+    [CmdletBinding()]
+    param([string]$Text)
+    if (-not $Text) { return '' }
+    return [regex]::Replace($Text, '\$\{(?:localEnv|env):([^}]*)\}', {
+            param($m)
+            $parts = $m.Groups[1].Value -split ':'
+            $value = if ($parts[0]) { [Environment]::GetEnvironmentVariable($parts[0]) } else { $null }
+            if ($null -ne $value) { return $value }
+            if ($parts.Count -gt 1) { return $parts[1] }
+            return ''
+        })
+}
+
+function Get-DevcontainerRemoteUser {
+    <#
+    .SYNOPSIS
+        The user to run `<engine> exec -u` as: the container's remoteUser (else containerUser) from the
+        devcontainer.metadata label `devcontainer up` sets, its ${localEnv:...} resolved here
+        (Resolve-DevcontainerLocalEnv), since the label keeps devcontainer.json's text as written. A
+        value that still holds a ${...} (one only the CLI knows) or resolves empty gives way to the
+        container's own user (Config.User, the user `exec` runs as without -u); empty when the engine
+        does not say, so -u is left out. Never returns a value containing "${".
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Engine, [Parameter(Mandatory)][string]$ContainerId)
+    try {
+        $text = (& $Engine inspect $ContainerId 2>$null) -join "`n"
+        if ($LASTEXITCODE -ne 0 -or -not $text) { return '' }
+        $config = @($text | ConvertFrom-Json)[0].Config
+        $label = $config.Labels.'devcontainer.metadata'
+        $meta = if ($label) { @($label | ConvertFrom-Json | ForEach-Object { $_ }) } else { @() }
+        $remote = ''; $container = ''
+        foreach ($m in $meta) {
+            if ($m.remoteUser) { $remote = [string]$m.remoteUser }
+            if ($m.containerUser) { $container = [string]$m.containerUser }
+        }
+        foreach ($candidate in @($remote, $container, [string]$config.User)) {
+            $user = (Resolve-DevcontainerLocalEnv -Text $candidate).Trim()
+            if ($user -and -not $user.Contains('${')) { return $user }
+            if ($candidate) { Write-Verbose "the container user '$candidate' does not resolve here; trying the next" }
+        }
+        return ''
+    }
+    catch { return '' }
+}
+
+function Invoke-OpenBaoSetup {
+    <#
+    .SYNOPSIS
+        One `openbao-setup` call in the container: `<engine> exec -i [-u <user>] <id>
+        /usr/local/bin/openbao-setup <arguments>`, InputBytes written to its stdin from memory (never
+        an argument, an environment variable or a file). Returns Code, Out (stdout, which may hold
+        secrets: never print it) and Err (stderr; empty with -PassError, which lets it reach the console).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Engine,
+        [Parameter(Mandatory)][string]$ContainerId,
+        [string]$User,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [byte[]]$InputBytes,
+        [switch]$PassError
+    )
+    $psi = [System.Diagnostics.ProcessStartInfo]::new($Engine)
+    $argv = @('exec', '-i')
+    if ($User) { $argv += @('-u', $User) }
+    $argv += @($ContainerId, $script:OpenBaoSetupPath) + $Arguments
+    foreach ($a in $argv) { $psi.ArgumentList.Add($a) }
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = -not $PassError
+    $psi.CreateNoWindow = $true
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $out = $p.StandardOutput.ReadToEndAsync()
+    $err = if ($PassError) { $null } else { $p.StandardError.ReadToEndAsync() }
+    try {
+        if ($InputBytes -and $InputBytes.Length -gt 0) {
+            $p.StandardInput.BaseStream.Write($InputBytes, 0, $InputBytes.Length)
+            $p.StandardInput.BaseStream.Flush()
+        }
+    }
+    catch { Write-Verbose "openbao-setup closed its stdin early: $($_.Exception.Message)" }
+    finally { try { $p.StandardInput.Close() } catch { Write-Verbose 'stdin already closed' } }
+    $p.WaitForExit()
+    return [pscustomobject]@{ Code = $p.ExitCode; Out = $out.Result; Err = $(if ($err) { $err.Result } else { '' }) }
+}
+
+function ConvertFrom-OpenBaoSetupOutput {
+    <# .SYNOPSIS The one JSON object openbao-setup writes on stdout (its last non-empty line), else $null. #>
+    [CmdletBinding()]
+    param([string]$Text)
+    $line = @("$Text" -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+    if (-not $line) { return $null }
+    try { return ($line | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+
+function Get-OpenBaoSetupReason {
+    <# .SYNOPSIS Why an openbao-setup call failed, in a few words: the JSON's error, else its code, else stderr's last line, else the exit code. #>
+    [CmdletBinding()]
+    param($Result, $Json)
+    if ($Result.Code -eq 3) { return "the container refused inside an agent's job (exit 3); run it yourself in a plain terminal" }
+    if ($Result.Code -eq 4) { return 'not applicable in this container (exit 4: no server mode, or unlock is not keyfile)' }
+    if ($Json -and $Json.error) { return [string]$Json.error }
+    if ($Json -and $Json.code) { return [string]$Json.code }
+    $last = @("$($Result.Err)" -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -Last 1
+    if ($last) { return $last.Trim() }
+    return "exit $($Result.Code)"
+}
+
+function Get-OpenBaoContainer {
+    <# .SYNOPSIS The running container of the workspace and its engine and remote user (Engine, Id, User); $null when none runs. Throws when the engine cannot list containers. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string]$DockerPath)
+    $engine = Resolve-DockerPath -DockerPath $DockerPath
+    if (-not $engine) { $engine = 'docker' }
+    $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath)
+    if ($ids.Count -eq 0) { return $null }
+    return [pscustomobject]@{ Engine = $engine; Id = $ids[0]; User = (Get-DevcontainerRemoteUser -Engine $engine -ContainerId $ids[0]) }
+}
+
+function Get-OpenBaoExecFailure {
+    <#
+    .SYNOPSIS
+        Why `openbao-setup unlock --status` could not be asked, in one line, or empty when its answer
+        only means "no openbao-setup that knows the key file here": exit 0, 4 (not applicable), 2 (an
+        older openbao-setup's usage), or no /usr/local/bin/openbao-setup (the engine names that path
+        with "not found" or "no such file or directory", or exits 126 or 127 saying nothing). Anything
+        else is the engine or the command failing, for example `exec -u` with a user the container does
+        not have: the exit code and stderr's first line (never stdout, which may hold secrets).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Result, [Parameter(Mandatory)]$Container)
+    $err = "$($Result.Err)"
+    if ($Result.Code -in 0, 2, 4) { return '' }
+    if (($Result.Code -in @(126, 127)) -and -not $err.Trim()) { return '' }
+    if ($err.Contains($script:OpenBaoSetupPath) -and $err -match 'not found|no such file or directory') { return '' }
+    $first = @($err -split "`r?`n" | Where-Object { $_.Trim() }) | Select-Object -First 1
+    $first = "$first".Trim() -replace '^Error response from daemon:\s*', ''
+    $engine = [IO.Path]::GetFileNameWithoutExtension([string]$Container.Engine)
+    if (-not $engine) { $engine = 'docker' }
+    $who = if ($Container.User) { "as user '$($Container.User)'" } else { 'as the container''s default user' }
+    $line = "$engine exec $who failed (exit $($Result.Code))"
+    if ($first) { $line += ": $first" }
+    return $line
+}
+
+function Get-OpenBaoUnlockStatus {
+    <#
+    .SYNOPSIS
+        openbao-setup unlock --status in the container: the JSON object, or $null when there is no
+        answer. $null is silent when there is no openbao-setup that knows it; when the call itself
+        failed (Get-OpenBaoExecFailure), -Failure, if given, receives the one-line reason.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Container, [ref]$Failure)
+    if ($Failure) { $Failure.Value = '' }
+    $r = Invoke-OpenBaoSetup -Engine $Container.Engine -ContainerId $Container.Id -User $Container.User -Arguments @('unlock', '--status')
+    if ($r.Code -ne 0) {
+        if ($Failure) { $Failure.Value = Get-OpenBaoExecFailure -Result $r -Container $Container }
+        return $null
+    }
+    $s = ConvertFrom-OpenBaoSetupOutput -Text $r.Out
+    if (-not $s -or -not $s.mode) { return $null }
+    return $s
+}
+
+function Write-OpenBaoWarning {
+    <# .SYNOPSIS One line per entry of the "warnings" list an openbao-setup answer carries. #>
+    param($Json)
+    if ($Json -and $Json.warnings) { foreach ($w in @($Json.warnings)) { if ($w) { Write-OpenBaoLine "warning: $w" } } }
+}
+
+function Write-OpenBaoLine {
+    <# .SYNOPSIS One line of the key-file steps, on the console (never stdout's pipeline); -Problem to stderr. #>
+    param([string]$Text, [switch]$Problem)
+    if ($Problem) { [Console]::Error.WriteLine("openbao: $Text") } else { Write-Host "openbao: $Text" }
+}
+
+function Invoke-OpenBaoUnlock {
+    <#
+    .SYNOPSIS
+        The unlock step after every `up` (and task devcontainer:openbao:unlock with -Explicit): asks
+        `openbao-setup unlock --status`; when mode is keyfile and the server is not ready, opens this
+        server's OpenBao key file and streams it into `openbao-setup unlock --stdin`; prints one line.
+        Silent when mode is off or operator, when the status says ready, and when the container has no
+        openbao-setup that answers (a repository without the Feature, or an older one); one line, also
+        after `up`, when asking failed for another reason (Get-OpenBaoExecFailure). Never throws.
+        Returns 0 (done, or nothing to do) or 1 (could not unlock); after `up` the code is ignored.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string]$DockerPath, [switch]$Explicit)
+    try {
+        $folder = (Resolve-Path -LiteralPath $WorkspaceFolder).Path
+        $c = Get-OpenBaoContainer -WorkspaceFolder $folder -DockerPath $DockerPath
+        if (-not $c) {
+            if ($Explicit) { Write-OpenBaoLine -Problem "No running devcontainer for $folder. Start it with: task dc:start (which unlocks OpenBao itself)." }
+            return [int]$Explicit.IsPresent
+        }
+        $why = ''
+        $s = Get-OpenBaoUnlockStatus -Container $c -Failure ([ref]$why)
+    }
+    catch {
+        if ($Explicit) { Write-OpenBaoLine -Problem "could not ask the container: $($_.Exception.Message)" }
+        return [int]$Explicit.IsPresent
+    }
+    if (-not $s -and $why) {
+        # Not "no openbao-setup here" but the call failing: one line, after up too, so it is not silent.
+        Write-OpenBaoLine -Problem "could not ask the container for OpenBao's unlock status: $why."
+        return 1
+    }
+    if (-not $s) {
+        if ($Explicit) { Write-OpenBaoLine -Problem 'this devcontainer has no openbao-setup that knows the OpenBao key file (the openbao Feature 1.5.0 or later, in server mode).' }
+        return [int]$Explicit.IsPresent
+    }
+    if ($s.mode -ne 'keyfile') {
+        if ($Explicit) { Write-OpenBaoLine "the openbao Feature here is set to unlock: $($s.mode), not keyfile; nothing to do (task openbao:unseal in the container)." }
+        return 0
+    }
+    if ($s.ready -eq $true) {
+        if ($Explicit) { Write-OpenBaoLine 'unsealed and logged in already; nothing sent.' }
+        return 0
+    }
+    if (-not $s.initialized -or -not $s.server) {
+        Write-OpenBaoLine -Problem 'OpenBao here is not initialised: make it and its OpenBao key file with task dc:openbao:keyfile:create on this workstation.'
+        return 1
+    }
+    $repo = Get-OpenBaoRepoName -WorkspaceFolder $folder
+    $path = Get-OpenBaoKeyFilePath -Repo $repo -Server ([string]$s.server)
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Write-OpenBaoLine -Problem "no OpenBao key file for this server ($repo, $($s.server)) on this workstation, so OpenBao stays sealed: make one with task dc:openbao:keyfile:create (or type two custody shares at task openbao:unseal in the container, then task dc:openbao:keyfile:rotate)."
+        return 1
+    }
+    $bytes = $null
+    try {
+        $bytes = Read-OpenBaoKeyFile -Path $path
+        $r = Invoke-OpenBaoSetup -Engine $c.Engine -ContainerId $c.Id -User $c.User -Arguments @('unlock', '--stdin') -InputBytes $bytes
+    }
+    catch {
+        Write-OpenBaoLine -Problem "the OpenBao key file $path could not be used ($($_.Exception.Message)); OpenBao stays sealed."
+        return 1
+    }
+    finally { if ($bytes) { [Array]::Clear($bytes, 0, $bytes.Length) } }
+    $j = ConvertFrom-OpenBaoSetupOutput -Text $r.Out
+    if ($r.Code -eq 0 -and $j -and $j.ok -eq $true) {
+        $done = if ($j.done) { [string]$j.done } else { 'unsealed, logged in' }
+        Write-OpenBaoLine "$done (the OpenBao key file)."
+        return 0
+    }
+    Write-OpenBaoLine -Problem "the OpenBao key file did not unlock OpenBao: $(Get-OpenBaoSetupReason -Result $r -Json $j)."
+    return 1
+}
+
+function Read-OpenBaoShare {
+    <# .SYNOPSIS Two unseal shares typed at hidden prompts (Read-Host -AsSecureString); returns the plain strings, which live in memory only. #>
+    [CmdletBinding()]
+    param([string]$What = 'custody share')
+    $shares = @()
+    foreach ($i in 1, 2) {
+        $sec = Read-Host -AsSecureString -Prompt "$What $i of 2 (hidden)"
+        $plain = [System.Net.NetworkCredential]::new('', $sec).Password
+        $sec.Dispose()
+        if (-not $plain -or -not $plain.Trim()) { throw 'an empty share; nothing was sent.' }
+        $shares += $plain.Trim()
+    }
+    if ($shares[0] -eq $shares[1]) { throw 'the same share twice; two different shares are needed. Nothing was sent.' }
+    return , $shares
+}
+
+function Write-OpenBaoCustodyShare {
+    <# .SYNOPSIS Prints the three new custody shares once, on the console, with what to do with them. #>
+    param([string[]]$Shares)
+    Write-Host ''
+    Write-Host 'openbao: the three new custody shares, shown this once. Store them again now, each in its own place, as before:'
+    $n = 1
+    foreach ($s in $Shares) { Write-Host "  custody share ${n}: $s"; $n++ }
+    Write-Host 'openbao: keep the previous custody shares until the backups made under them are pruned: an older backup opens only with the shares in force when it was made.'
+    Write-Host 'openbao: then clear this console (cls) so the shares do not stay in its scrollback.'
+    Write-Host ''
+}
+
+function Invoke-OpenBaoKeyFileMake {
+    <#
+    .SYNOPSIS
+        task devcontainer:openbao:keyfile:create and :rotate. Create: on an uninitialised server
+        {"init":true}, else two custody shares typed here; rotate: the key file's own two shares when
+        this workstation has it (nothing typed), else any two of the five typed. The shares go to
+        `openbao-setup keyfile <action> --stdin`, which answers with a pending rotation (OpenBao's
+        rekey verification). Then, in this order: the answer's key file is saved (DPAPI); `keyfile
+        confirm --stdin` gets the nonce and shares 4 and 5 read back from the saved file; only after
+        it answers ok are the three custody shares printed, once. A failed save, or a confirm that
+        fails, puts the previous key file back and runs `keyfile cancel --stdin` with this run's
+        nonce (the old shares stay in force); a rekey with another nonce is never cancelled. A lost
+        confirm answer is retried once (confirm is idempotent), then `keyfile status` decides: its
+        `pending` equal to this nonce's verification part (before its first colon) = not applied (cancel, restore); empty with five shares =
+        applied (custody shares printed); anything else = unknown (nothing cancelled, the previous
+        key file kept as <path>.previous, no custody share). Warnings the container returns are shown. Returns the
+        exit code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [Parameter(Mandatory)][ValidateSet('create', 'rotate')][string]$Action, [string]$DockerPath)
+    $folder = (Resolve-Path -LiteralPath $WorkspaceFolder).Path
+    $c = Get-OpenBaoContainer -WorkspaceFolder $folder -DockerPath $DockerPath
+    if (-not $c) { Write-OpenBaoLine -Problem "No running devcontainer for $folder. Start it with: task dc:start"; return 1 }
+    $why = ''
+    $s = Get-OpenBaoUnlockStatus -Container $c -Failure ([ref]$why)
+    if (-not $s -and $why) { Write-OpenBaoLine -Problem "could not ask the container for OpenBao's unlock status: $why."; return 1 }
+    if (-not $s) { Write-OpenBaoLine -Problem 'this devcontainer has no openbao-setup that knows the OpenBao key file (the openbao Feature 1.5.0 or later, in server mode).'; return 4 }
+    if ($s.mode -ne 'keyfile') { Write-OpenBaoLine -Problem "the openbao Feature here is set to unlock: $($s.mode); set its option unlock: keyfile (or OPENBAO_SETUP_UNLOCK=keyfile) and rebuild first."; return 4 }
+    $repo = Get-OpenBaoRepoName -WorkspaceFolder $folder
+    $request = [ordered]@{ v = 1 }
+    if ($Action -eq 'create' -and $s.initialized -ne $true) {
+        Write-OpenBaoLine 'OpenBao here is not initialised: initialising it with five shares, threshold two (nothing to type).'
+        $request.init = $true
+    }
+    elseif ($Action -eq 'rotate' -and $s.server -and (Test-Path -LiteralPath (Get-OpenBaoKeyFilePath -Repo $repo -Server ([string]$s.server)) -PathType Leaf)) {
+        Write-OpenBaoLine "rotating with this server's OpenBao key file (nothing to type)."
+        $kb = Read-OpenBaoKeyFile -Path (Get-OpenBaoKeyFilePath -Repo $repo -Server ([string]$s.server))
+        try { $request.shares = [string[]]@(([System.Text.Encoding]::UTF8.GetString($kb) | ConvertFrom-Json).shares) }
+        finally { [Array]::Clear($kb, 0, $kb.Length) }
+    }
+    else {
+        $what = if ($Action -eq 'create') { 'custody share' } else { 'unseal share (any two of the five)' }
+        Write-OpenBaoLine "type two of the server's unseal shares; they go to the container on stdin, never as an argument."
+        $request.shares = Read-OpenBaoShare -What $what
+    }
+    $request.repo = $repo
+    $payload = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $request -Compress))
+    $request = $null
+    try { $r = Invoke-OpenBaoSetup -Engine $c.Engine -ContainerId $c.Id -User $c.User -Arguments @('keyfile', $Action, '--stdin') -InputBytes $payload -PassError }
+    finally { [Array]::Clear($payload, 0, $payload.Length) }
+    $j = ConvertFrom-OpenBaoSetupOutput -Text $r.Out
+    Write-OpenBaoWarning -Json $j
+    if ($r.Code -ne 0 -or -not $j -or $j.ok -ne $true) {
+        Write-OpenBaoLine -Problem "keyfile:$Action failed: $(Get-OpenBaoSetupReason -Result $r -Json $j). Nothing was saved here; the old shares still unseal."
+        return $(if ($r.Code -ne 0) { $r.Code } else { 1 })
+    }
+    $server = [string]$(if ($j.server) { $j.server } else { $j.keyfile.server })
+    # The nonce is `<verification nonce>:<narrow confirm token>` (just `init` for an init): a secret,
+    # never printed or logged; sent whole on confirm and every cancel. keyfile status's `pending` is
+    # the verification nonce only, the part before the first colon.
+    $nonce = [string]$j.nonce
+    $verification = ($nonce -split ':', 2)[0]
+    # Cancels this run's own pending rekey only: always with its nonce, never one it did not start.
+    $cancel = {
+        $cb = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject ([ordered]@{ v = 1; server = $server; nonce = $nonce })))
+        $cr = Invoke-OpenBaoSetup -Engine $c.Engine -ContainerId $c.Id -User $c.User -Arguments @('keyfile', 'cancel', '--stdin') -InputBytes $cb -PassError
+        $cj = ConvertFrom-OpenBaoSetupOutput -Text $cr.Out
+        if ($cr.Code -eq 0 -and $cj -and $cj.ok -eq $true) { Write-OpenBaoLine -Problem 'the pending rotation is cancelled; the old shares still unseal.' }
+        else { Write-OpenBaoLine -Problem "the pending rotation could not be cancelled ($(Get-OpenBaoSetupReason -Result $cr -Json $cj)); the old shares still unseal, and the next keyfile:$Action cancels it first." }
+    }
+    if ($j.pending -ne $true -or -not $nonce -or -not $server) {
+        # No nonce of this run's to cancel with: nothing is cancelled (a rekey that is not ours is never touched).
+        Write-OpenBaoLine -Problem "keyfile:${Action}: the container answered without a pending rotation to confirm (it needs the openbao Feature 1.5.0 or later); nothing was saved or cancelled here."
+        return 1
+    }
+    $custody = @($j.custody | Where-Object { $_ })
+    $path = Get-OpenBaoKeyFilePath -Repo $repo -Server $server
+    # The key file this one replaces (rotate), kept as its protected bytes so a failed confirm can put it back.
+    $previous = if (Test-Path -LiteralPath $path -PathType Leaf) { [System.IO.File]::ReadAllBytes($path) } else { $null }
+    $restore = {
+        if ($previous) { [System.IO.File]::WriteAllBytes($path, $previous) }
+        else { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+    }
+    # Step 1 of 2: save the new key file, before the new shares take effect.
+    $json = $null
+    $confirmIn = $null
+    try {
+        $json = ConvertTo-OpenBaoKeyFileJson -KeyFile $j.keyfile -Repo $repo
+        [void](Save-OpenBaoKeyFile -Repo $repo -Server $server -Json $json)
+        # The confirm's shares come from the file just saved, read back: what unseals from now on is what is on disk.
+        $saved = Read-OpenBaoKeyFile -Path $path
+        try { $shares = [string[]]@(([System.Text.Encoding]::UTF8.GetString($saved) | ConvertFrom-Json).shares) }
+        finally { [Array]::Clear($saved, 0, $saved.Length) }
+        $confirmIn = [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -Compress -InputObject ([ordered]@{ v = 1; server = $server; nonce = $nonce; shares = $shares })))
+        $shares = $null
+    }
+    catch {
+        Write-OpenBaoLine -Problem "the OpenBao key file could not be saved ($($_.Exception.Message)); cancelling the rotation."
+        & $restore
+        & $cancel
+        return 1
+    }
+    finally { if ($json) { [Array]::Clear($json, 0, $json.Length) } }
+    # Step 2 of 2: confirm with shares 4 and 5 (OpenBao's rekey verification); once more if the answer is lost (idempotent).
+    $outcome = 'lost'
+    $reason = ''
+    try {
+        foreach ($attempt in 1, 2) {
+            $cr = Invoke-OpenBaoSetup -Engine $c.Engine -ContainerId $c.Id -User $c.User -Arguments @('keyfile', 'confirm', '--stdin') -InputBytes $confirmIn -PassError
+            $cj = ConvertFrom-OpenBaoSetupOutput -Text $cr.Out
+            Write-OpenBaoWarning -Json $cj
+            if ($cr.Code -eq 0 -and $cj -and $cj.ok -eq $true) { $outcome = 'ok'; break }
+            if ($cj -and $cj.ok -eq $false) { $outcome = 'failed'; $reason = Get-OpenBaoSetupReason -Result $cr -Json $cj; break }
+            $reason = Get-OpenBaoSetupReason -Result $cr -Json $cj
+        }
+    }
+    finally { [Array]::Clear($confirmIn, 0, $confirmIn.Length) }
+    if ($outcome -eq 'lost') {
+        # The confirm's answer is lost twice: keyfile status says whether this run's rekey is still
+        # pending (its nonce: not applied) or finished (pending empty, five shares: applied).
+        $sr = Invoke-OpenBaoSetup -Engine $c.Engine -ContainerId $c.Id -User $c.User -Arguments @('keyfile', 'status')
+        $sj = ConvertFrom-OpenBaoSetupOutput -Text $sr.Out
+        $known = $sr.Code -eq 0 -and $sj -and $sj.ok -eq $true -and $null -ne $sj.pending
+        if ($known -and [string]$sj.pending -eq '' -and [int]$sj.shares -eq 5) {
+            Write-OpenBaoLine "the confirm's answer was lost ($reason), but keyfile status shows no pending rotation and five shares in force: the rotation took effect. Check the backup with task openbao:server:status in the container."
+            $outcome = 'ok'
+        }
+        elseif ($known -and [string]$sj.pending -eq $verification) {
+            $reason = "no answer to the confirm ($reason), and keyfile status shows this rotation still pending"
+        }
+        else {
+            # Not ours to cancel, or no telling: keep the new key file, the previous one beside it, no custody share.
+            $what = if ($known -and $sj.pending) { 'another rotation is pending there (not this one: left alone)' } elseif ($known) { "no rotation is pending but the server has $($sj.shares) shares" } else { "keyfile status did not answer ($(Get-OpenBaoSetupReason -Result $sr -Json $sj))" }
+            $kept = ''
+            if ($previous) { [System.IO.File]::WriteAllBytes("$path.previous", $previous); $kept = " The previous one is kept as $path.previous: if OpenBao does not unseal with the new one, put that back." }
+            Write-OpenBaoLine -Problem "keyfile:${Action}: no answer to the confirm ($reason), and $what. Whether the new shares took effect cannot be told, so no custody share is shown and nothing is cancelled. The new OpenBao key file stays at $path.$kept Check with task openbao:server:status in the container."
+            return 1
+        }
+    }
+    if ($outcome -ne 'ok') {
+        Write-OpenBaoLine -Problem "keyfile:$Action was not confirmed: $reason. The new OpenBao key file is withdrawn$(if ($previous) { ' and the previous one put back' })."
+        & $restore
+        & $cancel
+        return 1
+    }
+    if ($custody.Count -gt 0) { Write-OpenBaoCustodyShare -Shares $custody }
+    else { Write-OpenBaoLine -Problem 'the container sent no custody shares back; check task openbao:server:status in the container.' }
+    Write-OpenBaoLine "the OpenBao key file is saved: $path (server $server). It opens only for this Windows account on this machine (and with the domain's DPAPI backup key on a domain-joined one)."
+    return 0
+}
+
+function Get-OpenBaoTransferPassphrase {
+    <# .SYNOPSIS A one-time transfer passphrase: 160 random bits in base32, in groups of four. #>
+    $alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+    $bytes = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(32)
+    $chars = foreach ($b in $bytes) { $alphabet[$b % 32] }
+    return ((-join $chars) -split '(.{4})' | Where-Object { $_ }) -join '-'
+}
+
+function Get-OpenBaoTransferKey {
+    param([string]$Phrase, [byte[]]$Salt, [int]$Iterations)
+    $norm = ($Phrase -replace '[\s-]', '').ToUpperInvariant()
+    $kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new([System.Text.Encoding]::UTF8.GetBytes($norm), $Salt, $Iterations, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
+    try { return , $kdf.GetBytes(32) } finally { $kdf.Dispose() }
+}
+
+function Export-OpenBaoKeyFile {
+    <#
+    .SYNOPSIS
+        task devcontainer:openbao:keyfile:export FILE=<path> [SERVER=<cluster id>]: writes this
+        repository's OpenBao key file to FILE, encrypted (AES-256-GCM, a key from PBKDF2-SHA256) with
+        a one-time transfer passphrase printed once here, for :import on another workstation. Refuses
+        a FILE that exists or lies inside the checkout. Returns the exit code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string]$File, [string]$Server)
+    if (-not $File) { Write-OpenBaoLine -Problem 'keyfile:export needs FILE=<path of the transfer file to write>, outside the checkout.'; return 1 }
+    $folder = (Resolve-Path -LiteralPath $WorkspaceFolder).Path
+    $target = [System.IO.Path]::GetFullPath($File, (Get-Location).Path)
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    if ($target.StartsWith($folder.TrimEnd($sep) + $sep, [StringComparison]::OrdinalIgnoreCase)) {
+        Write-OpenBaoLine -Problem "keyfile:export: $target is inside the checkout; write the transfer file elsewhere, so it never reaches git."
+        return 1
+    }
+    if (Test-Path -LiteralPath $target) { Write-OpenBaoLine -Problem "keyfile:export: $target exists; name a new file."; return 1 }
+    $repo = Get-OpenBaoRepoName -WorkspaceFolder $folder
+    $found = @(Find-OpenBaoKeyFile -Repo $repo -Server $Server)
+    if ($found.Count -eq 0) { Write-OpenBaoLine -Problem "no OpenBao key file for $repo$(if ($Server) { ", server $Server" }) on this workstation."; return 1 }
+    if ($found.Count -gt 1) { Write-OpenBaoLine -Problem "$repo has OpenBao key files for several servers; name one with SERVER=<cluster id>: $(($found | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')"; return 1 }
+    $plain = Read-OpenBaoKeyFile -Path $found[0]
+    try {
+        $kf = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json
+        $passphrase = Get-OpenBaoTransferPassphrase
+        $salt = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(16)
+        $nonce = [System.Security.Cryptography.RandomNumberGenerator]::GetBytes(12)
+        $key = Get-OpenBaoTransferKey -Phrase $passphrase -Salt $salt -Iterations $script:OpenBaoTransferIterations
+        $cipher = [byte[]]::new($plain.Length)
+        $tag = [byte[]]::new(16)
+        $aes = [System.Security.Cryptography.AesGcm]::new($key)
+        try { $aes.Encrypt($nonce, $plain, $cipher, $tag) } finally { $aes.Dispose(); [Array]::Clear($key, 0, $key.Length) }
+        $doc = [ordered]@{
+            v = 1; kind = $script:OpenBaoTransferKind; repo = [string]$kf.repo; server = [string]$kf.server
+            kdf = 'PBKDF2-SHA256'; iterations = $script:OpenBaoTransferIterations; cipher = 'AES-256-GCM'
+            salt = [Convert]::ToBase64String($salt); nonce = [Convert]::ToBase64String($nonce); tag = [Convert]::ToBase64String($tag)
+            data = [Convert]::ToBase64String($cipher)
+        }
+        [System.IO.File]::WriteAllText($target, (ConvertTo-Json -InputObject $doc -Compress) + "`n")
+    }
+    finally { [Array]::Clear($plain, 0, $plain.Length) }
+    Write-OpenBaoLine "the OpenBao key file of $repo (server $($kf.server)) is written to $target, encrypted."
+    Write-Host "openbao: the one-time transfer passphrase, shown this once: $passphrase"
+    Write-OpenBaoLine 'on the other workstation: task dc:openbao:keyfile:import FILE=<that file>, and type the passphrase there; the import deletes the file. Carry the file and the passphrase by different routes.'
+    return 0
+}
+
+function Import-OpenBaoKeyFile {
+    <#
+    .SYNOPSIS
+        task devcontainer:openbao:keyfile:import FILE=<transfer file>: asks the one-time transfer
+        passphrase (hidden), decrypts in memory, saves the key file with this workstation's DPAPI and
+        deletes the transfer file. Refuses when this workstation has a key file for that server
+        already (:forget it first). Returns the exit code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string]$File)
+    if (-not $File -or -not (Test-Path -LiteralPath $File -PathType Leaf)) { Write-OpenBaoLine -Problem "keyfile:import needs FILE=<the transfer file keyfile:export wrote>, and '$File' is not a file."; return 1 }
+    $folder = (Resolve-Path -LiteralPath $WorkspaceFolder).Path
+    $repo = Get-OpenBaoRepoName -WorkspaceFolder $folder
+    try { $doc = Get-Content -LiteralPath $File -Raw | ConvertFrom-Json -ErrorAction Stop } catch { $doc = $null }
+    if (-not $doc -or $doc.kind -ne $script:OpenBaoTransferKind -or $doc.v -ne 1) { Write-OpenBaoLine -Problem "$File is not an OpenBao key file transfer file."; return 1 }
+    if (Test-Path -LiteralPath (Get-OpenBaoKeyFilePath -Repo $repo -Server ([string]$doc.server)) -PathType Leaf) {
+        Write-OpenBaoLine -Problem "this workstation has an OpenBao key file for $repo, server $($doc.server), already; task dc:openbao:keyfile:forget SERVER=$($doc.server) first if this one should replace it. Nothing changed."
+        return 1
+    }
+    $sec = Read-Host -AsSecureString -Prompt 'the one-time transfer passphrase (hidden)'
+    $passphrase = [System.Net.NetworkCredential]::new('', $sec).Password
+    $sec.Dispose()
+    $plain = $null
+    try {
+        $salt = [Convert]::FromBase64String($doc.salt); $nonce = [Convert]::FromBase64String($doc.nonce)
+        $tag = [Convert]::FromBase64String($doc.tag); $cipher = [Convert]::FromBase64String($doc.data)
+        $key = Get-OpenBaoTransferKey -Phrase $passphrase -Salt $salt -Iterations ([int]$doc.iterations)
+        $plain = [byte[]]::new($cipher.Length)
+        $aes = [System.Security.Cryptography.AesGcm]::new($key)
+        try { $aes.Decrypt($nonce, $cipher, $tag, $plain) } finally { $aes.Dispose(); [Array]::Clear($key, 0, $key.Length) }
+    }
+    catch {
+        if ($plain) { [Array]::Clear($plain, 0, $plain.Length) }
+        Write-OpenBaoLine -Problem 'keyfile:import: the passphrase is wrong or the file is damaged; nothing changed and the file is kept.'
+        return 1
+    }
+    $json = $null
+    try {
+        $kf = [System.Text.Encoding]::UTF8.GetString($plain) | ConvertFrom-Json
+        $json = ConvertTo-OpenBaoKeyFileJson -KeyFile $kf -Repo $repo
+        $path = Save-OpenBaoKeyFile -Repo $repo -Server ([string]$kf.server) -Json $json
+    }
+    catch { Write-OpenBaoLine -Problem "keyfile:import: the OpenBao key file could not be saved ($($_.Exception.Message)); the transfer file is kept."; return 1 }
+    finally {
+        [Array]::Clear($plain, 0, $plain.Length)
+        if ($json) { [Array]::Clear($json, 0, $json.Length) }
+    }
+    if ($kf.repo -and [string]$kf.repo -ne $repo) { Write-OpenBaoLine "note: the key file was made for the folder $($kf.repo); it is kept here under $repo." }
+    Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $File) { Write-OpenBaoLine -Problem "keyfile:import: could not delete the transfer file $File; delete it yourself." }
+    Write-OpenBaoLine "the OpenBao key file is saved: $path (server $($kf.server)); the transfer file is deleted. The next task dc:start unlocks OpenBao with it."
+    return 0
+}
+
+function Remove-OpenBaoKeyFile {
+    <# .SYNOPSIS task devcontainer:openbao:keyfile:forget [SERVER=<cluster id>]: deletes this repository's OpenBao key file on this workstation, after a y at the prompt. Returns the exit code. #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string]$Server)
+    $repo = Get-OpenBaoRepoName -WorkspaceFolder $WorkspaceFolder
+    $found = @(Find-OpenBaoKeyFile -Repo $repo -Server $Server)
+    if ($found.Count -eq 0) { Write-OpenBaoLine "no OpenBao key file for $repo$(if ($Server) { ", server $Server" }) on this workstation; nothing to forget."; return 0 }
+    if ($found.Count -gt 1) { Write-OpenBaoLine -Problem "$repo has OpenBao key files for several servers; name one with SERVER=<cluster id>: $(($found | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')"; return 1 }
+    Write-OpenBaoLine "this deletes $($found[0]). Without it this workstation unseals that server only with two custody shares (task openbao:unseal in the container)."
+    $answer = Read-Host -Prompt 'Forget it? [y/N]'
+    if ($answer -notmatch '^(y|yes)$') { Write-OpenBaoLine 'kept.'; return 1 }
+    if (-not $PSCmdlet.ShouldProcess($found[0], 'Remove the OpenBao key file')) { return 1 }
+    Remove-Item -LiteralPath $found[0] -Force
+    Write-OpenBaoLine 'forgotten. Its shares 4 and 5 still open the server (and its backups) until task dc:openbao:keyfile:rotate makes new ones; set the Feature option unlock: operator to go back to typing.'
+    return 0
+}
+
+function Invoke-OpenBaoKeyFileTask {
+    <#
+    .SYNOPSIS
+        The devcontainer:openbao:keyfile:* tasks: Arguments[0] is create, rotate, export, import or
+        forget, then --file <path> and --server <cluster id>. create, rotate, export and import
+        refuse (exit 3) when DEVHOST_JOB_CHILD, CLAUDECODE or a name in OPENBAO_AGENT_JOB_VARS is set
+        on this workstation: they handle custody shares or the whole key file. Returns the exit code.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$WorkspaceFolder, [string[]]$Arguments = @(), [string]$DockerPath)
+    $a = @($Arguments)
+    $action = $a | Select-Object -First 1
+    $file = ''; $server = ''
+    for ($i = 1; $i -lt $a.Count; $i++) {
+        switch ($a[$i]) {
+            '--file' { $i++; $file = $a[$i] }
+            '--server' { $i++; $server = $a[$i] }
+            default { Write-OpenBaoLine -Problem "keyfile: unknown argument '$($a[$i])'."; return 2 }
+        }
+    }
+    if ($action -notin 'create', 'rotate', 'export', 'import', 'forget') {
+        Write-OpenBaoLine -Problem "keyfile: create, rotate, export, import or forget (got '$action')."
+        return 2
+    }
+    if ($action -ne 'forget') {
+        $agentVar = Get-OpenBaoAgentJobVariable
+        if ($agentVar) {
+            Write-OpenBaoLine -Problem "keyfile:$action refuses inside an agent's job ($agentVar is set on this workstation): it handles custody shares or the whole OpenBao key file, which must never land in a transcript. Run it yourself in a plain terminal."
+            return 3
+        }
+    }
+    switch ($action) {
+        'create' { return (Invoke-OpenBaoKeyFileMake -WorkspaceFolder $WorkspaceFolder -Action create -DockerPath $DockerPath) }
+        'rotate' { return (Invoke-OpenBaoKeyFileMake -WorkspaceFolder $WorkspaceFolder -Action rotate -DockerPath $DockerPath) }
+        'export' { return (Export-OpenBaoKeyFile -WorkspaceFolder $WorkspaceFolder -File $file -Server $server) }
+        'import' { return (Import-OpenBaoKeyFile -WorkspaceFolder $WorkspaceFolder -File $file) }
+        'forget' { return (Remove-OpenBaoKeyFile -WorkspaceFolder $WorkspaceFolder -Server $server) }
+    }
+}
+
+function Invoke-DevcontainerCli {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Subcommand,
+        [Parameter(Mandatory)][string]$WorkspaceFolder,
+        [string[]]$Arguments = @(),
+        [string]$CommandB64,
+        [string]$NodeVersion,
+        [string]$CliVersion,
+        [string]$DockerPath,
+        [switch]$Force
+    )
+
+    # `stop` is not a CLI subcommand: the whole of it (running? check? stop?)
+    # is one command here.
+    # `prepshutdown` is the same without the stop (-CheckOnly).
+    if ($Subcommand -in 'stop', 'prepshutdown') {
+        Stop-Devcontainer -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath -CommandB64 $CommandB64 -Force:$Force `
+            -CheckOnly:($Subcommand -eq 'prepshutdown') -NodeVersion $NodeVersion -CliVersion $CliVersion
+        return
+    }
+
+    # `openbao-ssh-import` is not a CLI subcommand: the key file is Arguments[0], the name [1].
+    if ($Subcommand -eq 'openbao-ssh-import') {
+        $a = @($Arguments)
+        Import-OpenBaoSshKey -WorkspaceFolder $WorkspaceFolder -KeyFile ($a | Select-Object -First 1) -Name ($a | Select-Object -Skip 1 -First 1) -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+        return
+    }
+
+    # `ssh-key-import` is not a CLI subcommand: the key file is Arguments[0].
+    if ($Subcommand -eq 'ssh-key-import') {
+        Import-SshKey -WorkspaceFolder $WorkspaceFolder -KeyFile ($Arguments | Select-Object -First 1) -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+        return
+    }
+
+    # `audio` is not a CLI subcommand: the workstation's switch for the microphone.
+    if ($Subcommand -eq 'audio') {
+        $rc = Invoke-HostAudio -Arguments $Arguments
+        if ($rc -ne 0) { exit $rc }
+        return
+    }
+
+    # `cloud-folder-login` is not a CLI subcommand: the cloud-folder Feature's sign-in from here.
+    if ($Subcommand -eq 'cloud-folder-login') {
+        Invoke-CloudFolderLogin -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+        if ($script:CliExitCode -ne 0) { exit $script:CliExitCode }
+        return
+    }
+
+    # `openbao-unlock` and `openbao-keyfile` are not CLI subcommands: the OpenBao key file (Windows).
+    if ($Subcommand -eq 'openbao-unlock') {
+        exit (Invoke-OpenBaoUnlock -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath -Explicit)
+    }
+    if ($Subcommand -eq 'openbao-keyfile') {
+        exit (Invoke-OpenBaoKeyFileTask -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments -DockerPath $DockerPath)
+    }
+
+    # `host` is not a CLI subcommand: it prints the resolved host profile and starts nothing.
+    if ($Subcommand -eq 'host') { Show-HostProfile -DockerPath $DockerPath -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments; return }
+
+    # `running` is not a CLI subcommand either: exit 0 when a container of the
+    # workspace runs, 1 when none does, 2 when the engine cannot be asked.
+    if ($Subcommand -eq 'running') {
+        try { $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath) }
+        catch {
+            [Console]::Error.WriteLine($_.Exception.Message)
+            [Console]::Error.WriteLine("the container engine could not be reached.")
+            exit 2
+        }
+        if ($ids.Count -gt 0) { exit 0 } else { exit 1 }
+    }
+
+    # An image build takes the host-wide lock (see Enter-DevcontainerBuildLock);
+    # the CLI's own temp image name is shared by every repository.
+    $lock = if (Test-BuildSubcommand -Subcommand $Subcommand -Arguments $Arguments) {
+        Enter-DevcontainerBuildLock -WorkspaceFolder $WorkspaceFolder -Subcommand $Subcommand -Arguments $Arguments -DockerPath $DockerPath
+    }
+    try {
+        # Inside the lock, right before the CLI: the build that held it may have left the engine busy.
+        if (Test-EngineSubcommand -Subcommand $Subcommand) { Wait-ContainerEngine -DockerPath $DockerPath }
+        Invoke-DevcontainerCliProcess -Subcommand $Subcommand -WorkspaceFolder $WorkspaceFolder -Arguments $Arguments `
+            -CommandB64 $CommandB64 -NodeVersion $NodeVersion -CliVersion $CliVersion -DockerPath $DockerPath
+    }
+    finally { Exit-DevcontainerBuildLock -Lock $lock }
+    $rc = $script:CliExitCode
+    if ($rc -eq 0) {
+        # After every up (so start, shell, exec, agent, claude, rebuild): the OpenBao key file's unlock
+        # step; silent unless the openbao Feature here is set to unlock: keyfile. It never fails the up.
+        if ($Subcommand -eq 'up') {
+            try { [void](Invoke-OpenBaoUnlock -WorkspaceFolder $WorkspaceFolder -DockerPath $DockerPath) }
+            catch { Write-Verbose "the OpenBao unlock step: $($_.Exception.Message)" }
+        }
+        return
+    }
+
+    if ($Subcommand -ne 'exec') {
+        if (Test-EngineSubcommand -Subcommand $Subcommand) { Write-ContainerEngineDiagnosis -DockerPath $DockerPath }
+        throw "devcontainer $Subcommand failed with exit code $rc."
+    }
+
+    # A failed exec: say which of three things failed, by asking the engine.
+    $folder = (Resolve-Path $WorkspaceFolder).Path
+    try { $ids = @(Get-RunningDevcontainerId -WorkspaceFolder $folder -DockerPath $DockerPath) }
+    catch {
+        $engine = Resolve-DockerPath -DockerPath $DockerPath
+        [Console]::Error.WriteLine($_.Exception.Message)
+        [Console]::Error.WriteLine("the container engine ($(if ($engine) { $engine } else { 'docker' })) could not be reached.")
+        exit 2
+    }
+    if ($ids.Count -eq 0) {
+        [Console]::Error.WriteLine("No running devcontainer for $folder. Start it with: task dc:start")
+        exit 1
+    }
+    $text = if ($CommandB64) { [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($CommandB64)) } else { $Arguments -join ' ' }
+    if ($text.Length -gt 80) { $text = $text.Substring(0, 80) }
+    [Console]::Error.WriteLine("The command exited with code $rc inside the devcontainer: $text (its output is above).")
+    exit $rc
+}
+
+Export-ModuleMember -Function Get-HostTypeId, Get-DefaultHostTypePriority, Resolve-HostType, Resolve-SshAgent, Resolve-HostProfile, Initialize-HostEnvironment, Test-FuseRequested, Get-FuseRefusal, Get-FuseRunArgument, Get-FuseSlotMissing, Write-FuseSlotWarning, Write-FuseRefusedWarning, Get-AudioRequest, Get-AudioRefusal, Invoke-WslSh, Invoke-WslgBind, Initialize-HostAudio, ConvertTo-AudioSecond, Format-AudioDuration, Invoke-HostAudio, ConvertTo-MachineName, Get-HostMachineName, Test-MachineSlotMissing, Write-MachineSlotWarning, Get-DevcontainerConfigFile, Get-HostMount, Test-CloudFolderMount, ConvertTo-MountArgument, ConvertTo-JsonWithoutComment, Get-ConfiguredMountTarget, Test-HostMountsEnabled, Resolve-HostMount, Initialize-HostMountSource, Get-HostMountArgument, Show-HostProfile, Import-SshKey, Import-OpenBaoSshKey, Clear-HostProfileCache, Get-SettingOrEnv, ConvertFrom-TaskCliArgString, Get-PortableNodeDir, Invoke-DcfDownload, Get-DevcontainersCliEntrypoint, Remove-DevcontainersCli, Resolve-DockerPath, Get-WorkspaceFolderVariant, Get-RunningDevcontainerId, Stop-Devcontainer, Test-BuildSubcommand, Get-BuildLockStateDir, Get-BuildLockLabel, Get-BuildLockWaitMessage, Get-EngineBuildxVersion, Get-BuildLockSkipReason, Enter-DevcontainerBuildLock, Exit-DevcontainerBuildLock, Test-EngineSubcommand, Get-ContainerEngineCheck, Test-ContainerEngineResponding, Get-ContainerEngineError, Get-ContainerEngineStartHint, Wait-ContainerEngine, Write-ContainerEngineDiagnosis, Get-DevcontainerCliInvocation, Invoke-DevcontainerCliProcess, Get-LauncherCacheRoot, Get-CloudFolderRcloneVersion, Get-WorkstationRclone, Open-Browser, Invoke-CloudFolderRelayRequest, Invoke-CloudFolderLoginRelay, Invoke-CloudFolderLogin, Get-OpenBaoKeyFileDir, Get-OpenBaoRepoName, Get-OpenBaoKeyFilePath, Find-OpenBaoKeyFile, Protect-OpenBaoKeyFileBlob, Unprotect-OpenBaoKeyFileBlob, Save-OpenBaoKeyFile, Read-OpenBaoKeyFile, ConvertTo-OpenBaoKeyFileJson, Get-OpenBaoAgentJobVariable, Resolve-DevcontainerLocalEnv, Get-DevcontainerRemoteUser, Invoke-OpenBaoSetup, ConvertFrom-OpenBaoSetupOutput, Get-OpenBaoUnlockStatus, Invoke-OpenBaoUnlock, Invoke-OpenBaoKeyFileMake, Export-OpenBaoKeyFile, Import-OpenBaoKeyFile, Remove-OpenBaoKeyFile, Invoke-OpenBaoKeyFileTask, Invoke-DevcontainerCli

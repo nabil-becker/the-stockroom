@@ -1,0 +1,18 @@
+name: Set up uv
+description: Install the uv the workstation pins (its Dockerfile's ghcr.io/astral-sh/uv stage), so CI and the dev container resolve uv.lock the same way
+runs:
+  using: composite
+  steps:
+    - id: pin
+      shell: bash
+      run: |
+        version=$(sed -n 's|^FROM ghcr\.io/astral-sh/uv:\([^@ ]*\)@sha256:.*|\1|p' "$GITHUB_WORKSPACE/.devcontainer/Dockerfile")
+        if [ -z "$version" ]; then
+          echo "::error file=.devcontainer/Dockerfile::no FROM ghcr.io/astral-sh/uv:<version>@sha256:... stage to take the uv version from"
+          exit 1
+        fi
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+      with:
+        version: ${{ steps.pin.outputs.version }}
+        enable-cache: 'false'

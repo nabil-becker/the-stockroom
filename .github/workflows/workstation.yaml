@@ -1,0 +1,77 @@
+name: Workstation
+# The workstation dev container is infrastructure as code: rebuild it on a clean runner from
+# the committed definition (Dockerfile digests, Feature options, devcontainer-lock.json with
+# --frozen-lockfile, uv.lock) and check that what it installs matches the pins.
+on:
+  pull_request:
+    paths:
+      - '.devcontainer/**'
+      - 'devcontainer-features/.devcontainer/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'tools/environment/**'
+      - 'Taskfile.yml'
+      - '.github/actions/setup-uv/**'
+      - '.github/workflows/workstation.yaml'
+  push:
+    branches: [main]
+    paths:
+      - '.devcontainer/**'
+      - 'devcontainer-features/.devcontainer/**'
+      - 'pyproject.toml'
+      - 'uv.lock'
+      - '.python-version'
+      - 'tools/environment/**'
+      - 'Taskfile.yml'
+      - '.github/actions/setup-uv/**'
+      - '.github/workflows/workstation.yaml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-uv
+      - run: |
+          python3 -m unittest discover -s tools/environment
+          python3 tools/environment/check.py check
+
+  build:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The CLI version is the workstation's devcontainer-cli option (check.py keeps them equal).
+      - run: npx --yes @devcontainers/cli@0.91.0 build --workspace-folder . --frozen-lockfile --image-name stockroom-workstation:ci
+      # A login interactive shell, as the devcontainer CLI probes a session's environment
+      # (pipx tools such as yamllint are on PATH there). Root: the checkout is the runner's.
+      - run: |
+          docker run --rm -u root -v "$PWD:/workspaces/the-stockroom" -w /workspaces/the-stockroom \
+            stockroom-workstation:ci bash -lic '
+              set -e
+              task env:setup
+              task env:check
+              task version:check
+              pwsh --version
+              pwsh -NoProfile -c "Get-Module -ListAvailable Pester,PSScriptAnalyzer | Format-Table Name,Version"
+              helm version --short
+              uv --version
+              uv run --locked python --version
+              shellcheck --version | sed -n 2p
+              yamllint --version
+              task --version
+              docker --version
+              docker buildx version
+              docker compose version
+              bao version
+              devcontainer --version
+              claude --version
+              copilot --version
+            '

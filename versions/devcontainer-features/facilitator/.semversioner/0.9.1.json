@@ -1,0 +1,10 @@
+{
+  "changes": [
+    {
+      "description": "Download new node bundles from the-stockroom; retain the original release assets and SHA-256 pins for bundles 0.3.0 through 0.9.0.",
+      "type": "patch"
+    }
+  ],
+  "created_at": "2026-11-26T17:51:26+00:00",
+  "version": "0.9.1"
+}

@@ -1,0 +1,561 @@
+# Reusable devcontainer:* tasks - drive @devcontainers/cli against the
+# including repo's .devcontainer without installing Node.js or the CLI on the
+# host. Vendored into a repo (together with ./host/*) into
+# .devcontainer/cli_bootstrap.ignore/ (or the repo-relative BOOTSTRAP_DIR; git-ignored) by
+#   irm  https://raw.githubusercontent.com/nabil-becker/the-stockroom/main/devcontainer-features/bootstrap/bootstrap.ps1 | iex   (Windows)
+#   curl -fsSL https://raw.githubusercontent.com/nabil-becker/the-stockroom/main/devcontainer-features/bootstrap/bootstrap.sh | bash  (Linux/macOS)
+# and included from the repo's Taskfile.yml as
+#   includes:
+#     devcontainer:
+#       taskfile: ./.devcontainer/cli_bootstrap.ignore/devcontainer.yml   # or ./<BOOTSTRAP_DIR>/devcontainer.yml
+#       optional: true     # a fresh clone lacks the git-ignored folder until the bootstrap ran
+#       aliases: [dc]      # task dc:up == task devcontainer:up
+# (repositories that vendored into ./bootstrap/ keep working with
+# `taskfile: ./bootstrap/devcontainer.yml`; re-running the bootstrap migrates them.)
+# The host scripts are found next to this file ({{.TASKFILE_DIR}}/host/), so the
+# folder can be anywhere in the repo.
+# It cannot be a *remote* include: the tasks run the scripts next to this
+# file and Task leaves TASKFILE_DIR empty for remote Taskfiles. Re-run the
+# bootstrap to refresh the vendored copy.
+#
+# Platforms: Windows runs host/Invoke-DevcontainerCli.ps1 (pwsh, portable
+# Node.js cached in %LOCALAPPDATA%); Linux/macOS run devcontainer-cli.sh
+# (`devcontainer` on PATH, else a portable Node.js cached in ~/.cache). That
+# bash script is the devcontainer-cli Feature's own installer: in a
+# consuming repo it is vendored to host/devcontainer-cli.sh, in the
+# collection repo it stays at src/devcontainer-cli/devcontainer-cli.sh -
+# _BASH_CLI below finds whichever exists. Same behaviour and settings on
+# both platforms.
+#
+# Settings - each is a Task var that falls back to the variable of the same
+# name from the root Taskfile's `dotenv:` files or the environment:
+#   DEVCONTAINER_DOCKER_PATH   docker-compatible CLI for --docker-path: a name
+#                              on PATH (docker, wslc, podman, nerdctl, finch)
+#                              or a full path. Unset = docker on PATH, else
+#                              wslc.exe on Windows.
+#   HOST_TYPE                  the kind of host: auto (default), windows-docker,
+#                              windows-wsl-docker, windows-wslc, linux or macos.
+#                              An explicit id skips detection. Before it runs the
+#                              CLI the launcher sets DCF_HOST_TYPE, DCF_HOST_HOME
+#                              and DCF_HOST_SSH_AGENT in its environment; a repo
+#                              maps them with containerEnv (see devcontainer.json
+#                              in the bootstrap). `task devcontainer:host` shows
+#                              the result. DEVCONTAINER_DOCKER_PATH, when set,
+#                              still names the engine whatever the host type.
+#   HOST_TYPE_PRIORITY         ordered, comma-separated ids that auto tries (an
+#                              organisation sets its own, e.g. in .devcontainer/.env).
+#                              Default: windows-docker,windows-wsl-docker,windows-wslc
+#                              on Windows; windows-wsl-docker inside a WSL distro;
+#                              linux; macos.
+#   HOST_MOUNTS                false = the launcher adds no host mounts. By default `up`
+#                              (so rebuild) passes the mounts the host type needs as
+#                              `--mount type=bind,source=..,target=..`: the host
+#                              home's .git-dirs at /git-dirs and, where the host type has
+#                              one, the SSH agent socket, so a repository needs no
+#                              mount line of its own; one it already has (same target in
+#                              its devcontainer.json) is kept and the launcher's skipped.
+#                              `task devcontainer:host` lists what would be added.
+#   SSH_AGENT_MODE             key = opt into a signing key kept in the container (the
+#                              ssh-agent Feature's key mode; it breaks "the private key
+#                              never enters the container" for you): DCF_HOST_SSH_AGENT=key
+#                              and no agent socket mounted. Unset = the host type decides:
+#                              the agent socket is mounted on linux, macos and
+#                              windows-wsl-docker from a distro, none on the Windows
+#                              engines (no host process may be left running).
+#   DCF_HOST_CLOUD_FOLDER      a host folder a sync client keeps (a SharePoint or OneDrive
+#                              folder): `up` bind-mounts it at /mnt/cloud-folder-host, the
+#                              cloud-folder Feature's host mount (its mountPoint option links
+#                              there), and passes the variable on, for containerEnv. Unset =
+#                              no folder. Never created: a path missing on this host is skipped
+#                              with a warning (the Feature's status then fails).
+#   DCF_HOST_MACHINE           (set by the launcher, not a setting) the workstation's machine
+#                              name; the bootstrap's devcontainer.json passes it on with
+#                              containerEnv, and `up` warns when a repository's lacks the line.
+#   DCF_HOST_FUSE              1 = this project asks for FUSE on this machine (the cloud-folder
+#                              Feature's mount mode): `up` sets DCF_HOST_FUSE_DEVICE,
+#                              DCF_HOST_FUSE_CAP and DCF_HOST_FUSE_SECURITY, which the
+#                              repository's runArgs read (the bootstrap's devcontainer.json has
+#                              the lines; `up` warns when they are missing). Unset = no grant,
+#                              never by default. Takes effect at the next rebuild. Not granted
+#                              on windows-wslc (wslc run has no such options): `up` warns once
+#                              and starts the container without FUSE.
+#   DCF_HOST_AUDIO             wslg = this machine gives the container its microphone through
+#                              WSLg's PulseAudio socket (the audio Feature; windows-docker and
+#                              windows-wsl-docker): `up` binds the default WSL distro's /mnt/wslg
+#                              to /mnt/wsl/wslg as root (skipped when already there; a WSL restart
+#                              drops it, the next `up` redoes it), mounts it at /mnt/wslg and passes
+#                              DCF_HOST_AUDIO=wslg on for containerEnv. Unset or none = nothing runs,
+#                              none passed on. A host that cannot carry it warns once and starts the
+#                              container without audio. Takes effect at the next rebuild.
+#   CLOUD_FOLDER_LOGIN_TIMEOUT for `cloud-folder-login`: the seconds the sign-in relay stays
+#                              open (default 600).
+#   DEVCONTAINER_NODE_VERSION  portable Node.js version (default in the scripts).
+#   DEVCONTAINER_CLI_VERSION   @devcontainers/cli version (default: latest).
+#   DEVCONTAINER_HOMES         host folder for bind-mounted tool state
+#                              (homes task; default ~/.devcontainer-homes).
+#   STOP_CHECK                 command `devcontainer:stop` (and so rebuild, and
+#                              devcontainer:prepshutdown) runs inside the
+#                              container before stopping it. Unset = resolve it:
+#                              the repository's `task shutdown:check`, else
+#                              `devhost-shutdown-check`, else none (the stop goes
+#                              ahead). No single quote in it. The contract is in
+#                              bootstrap/SHUTDOWN.md in the collection.
+#   FORCE=1 (task var)         stop/rebuild without running that check.
+#   AGENTS_FILE                for `agent`, `agent:list` and `agent:reset`: the agent list, relative to the
+#                              repository root (default .devcontainer/agents.yml; the agents
+#                              Feature resolves it inside: task variable, .env, environment).
+#   HOST_SESSION               (deprecated with `claude`) UUID of the Claude Code session that the claude
+#                              task resumes (HOST_SESSION_<DIR> per sub-folder).
+#                              A session running in the folder (`claude agents --json`,
+#                              an entry with a pid) is never started twice: claude-host
+#                              names it and exits 1 (CLAUDE_HOST_ALLOW_SECOND=1 overrides);
+#                              a stale pin (after /clear) is reported, and the opt-in
+#                              claude-host-pin SessionStart hook (claude-code Feature
+#                              NOTES) keeps the line in .devcontainer/.env current.
+#   SESSIONS                   (deprecated with `claude:fleet`) one line per session,
+#                              name|session-variable|dir|extra claude args, set where the
+#                              Taskfile includes this file, e.g.
+#                                includes:
+#                                  devcontainer:
+#                                    taskfile: ./.devcontainer/cli_bootstrap.ignore/devcontainer.yml
+#                                    vars:
+#                                      SESSIONS: |
+#                                        solis|HOST_SESSION_SOLIS|rooms/solis|--model sonnet
+#                                        atlas|HOST_SESSION_ATLAS|rooms/atlas|
+#                              (variables are read from .devcontainer/.env first, then the
+#                              container's environment). `task devcontainer:claude:fleet -- --plan`
+#                              prints what it would do (and lists duplicate sessions), `-- --no-view`
+#                              starts without the view, `-- --no-wait` skips the wait for restored
+#                              sessions, `-- --stop-duplicates` stops extra sessions (claude stop).
+#   DEVCONTAINER_ENGINE_WAIT   seconds to wait for the container engine to answer before
+#                              up, build, exec, set-up and run-user-commands (default 60;
+#                              0 = no wait). One check when it answers; otherwise "waiting for
+#                              the container engine to answer..." once, a check every second,
+#                              and then a failure naming the engine and how to start it. A
+#                              failed up or build prints the engine's own error.
+#   DEVCONTAINER_BUILD_LOCK    0 = do not serialise `up`/`build` host-wide; 1 = serialise
+#                              them on every engine (default: one image build at a time,
+#                              skipped when the engine builds with BuildKit build contexts,
+#                              never on wslc; see README).
+#   DEVCONTAINER_BUILD_LOCK_FEATURES_TEST  true = `features test` takes that
+#                              lock too (default false).
+#   WORKSPACE_FOLDER           folder containing .devcontainer/ (default: the
+#                              root Taskfile's folder).
+# Shutdown check: see SHUTDOWN.md (what a check is, its exit codes, the
+# resolution order): https://github.com/nabil-becker/the-stockroom/blob/main/devcontainer-features/bootstrap/SHUTDOWN.md
+# Tasks: up (alias start) and stop (alias down) are idempotent, so the
+# others require them: exec, shell, pwsh and claude bring the container up
+# first, stop does nothing when none runs, rebuild stops it first (with the
+# shutdown check; a failing stop does not block it) and then recreates it. build and config touch no container.
+# stop is one host-script command (running? check? stop?), the same in both
+# scripts; running exits 0/1/2 (running / none / engine unreachable).
+# Precedence, as Task resolves template vars: a var on the command line
+# (`task devcontainer:up DEVCONTAINER_DOCKER_PATH=wslc`) beats the .env
+# files, which beat an exported environment variable. This file must not
+# declare a global `env:` for these names: Task would then ignore the .env
+# values for the whole project, including the root Taskfile's own tasks.
+version: '3'
+
+vars:
+  WORKSPACE_FOLDER: '{{.WORKSPACE_FOLDER | default .ROOT_DIR}}'
+  DEVCONTAINER_DOCKER_PATH: '{{.DEVCONTAINER_DOCKER_PATH | default ""}}'
+  DEVCONTAINER_NODE_VERSION: '{{.DEVCONTAINER_NODE_VERSION | default ""}}'
+  DEVCONTAINER_CLI_VERSION: '{{.DEVCONTAINER_CLI_VERSION | default ""}}'
+  HOST_TYPE: '{{.HOST_TYPE | default ""}}'
+  HOST_TYPE_PRIORITY: '{{.HOST_TYPE_PRIORITY | default ""}}'
+  HOST_MOUNTS: '{{.HOST_MOUNTS | default ""}}'
+  SSH_AGENT_MODE: '{{.SSH_AGENT_MODE | default ""}}'
+  DCF_HOST_CLOUD_FOLDER: '{{.DCF_HOST_CLOUD_FOLDER | default ""}}'
+  DCF_HOST_FUSE: '{{.DCF_HOST_FUSE | default ""}}'
+  DCF_HOST_AUDIO: '{{.DCF_HOST_AUDIO | default ""}}'
+  _PS_SETTINGS: -DockerPath '{{.DEVCONTAINER_DOCKER_PATH}}' -NodeVersion '{{.DEVCONTAINER_NODE_VERSION}}' -CliVersion '{{.DEVCONTAINER_CLI_VERSION}}'
+  # Only the tasks that run the CLI (and `host`) take the host type and the host mounts switch.
+  # A folder path may hold spaces and quotes (a synced library's name), hence shellQuote.
+  _PS_HOST_SETTINGS: -HostType '{{.HOST_TYPE}}' -HostTypePriority '{{.HOST_TYPE_PRIORITY}}' -HostMounts '{{.HOST_MOUNTS}}' -SshAgentMode '{{.SSH_AGENT_MODE}}' -CloudFolder {{shellQuote .DCF_HOST_CLOUD_FOLDER}} -Fuse '{{.DCF_HOST_FUSE}}' -Audio '{{.DCF_HOST_AUDIO}}'
+  # Linux/macOS: the bash script reads the environment. The resolved values
+  # are prefixed to the command rather than set through `env:` (see above).
+  _SH_SETTINGS: >-
+    {{if .DEVCONTAINER_DOCKER_PATH}}DEVCONTAINER_DOCKER_PATH='{{.DEVCONTAINER_DOCKER_PATH}}' {{end}}{{if .DEVCONTAINER_NODE_VERSION}}DEVCONTAINER_NODE_VERSION='{{.DEVCONTAINER_NODE_VERSION}}' {{end}}{{if .DEVCONTAINER_CLI_VERSION}}DEVCONTAINER_CLI_VERSION='{{.DEVCONTAINER_CLI_VERSION}}' {{end}}{{if .HOST_TYPE}}HOST_TYPE='{{.HOST_TYPE}}' {{end}}{{if .HOST_TYPE_PRIORITY}}HOST_TYPE_PRIORITY='{{.HOST_TYPE_PRIORITY}}' {{end}}{{if .HOST_MOUNTS}}HOST_MOUNTS='{{.HOST_MOUNTS}}' {{end}}{{if .SSH_AGENT_MODE}}SSH_AGENT_MODE='{{.SSH_AGENT_MODE}}' {{end}}{{if .DCF_HOST_CLOUD_FOLDER}}DCF_HOST_CLOUD_FOLDER={{shellQuote .DCF_HOST_CLOUD_FOLDER}} {{end}}{{if .DCF_HOST_FUSE}}DCF_HOST_FUSE={{shellQuote .DCF_HOST_FUSE}} {{end}}{{if .DCF_HOST_AUDIO}}DCF_HOST_AUDIO={{shellQuote .DCF_HOST_AUDIO}} {{end}}
+  # The shutdown check when STOP_CHECK is unset, run by `bash -lc` inside the
+  # container from the workspace folder (the CLI's exec starts there): the
+  # repository's `task shutdown:check` if its Taskfile defines it, else the
+  # devhost Feature's devhost-shutdown-check, else nothing to check. One line,
+  # no single quote: it travels base64-encoded as CMD and the test
+  # test/bootstrap/shutdown_resolution_test.sh extracts it from here.
+  _SHUTDOWN_CHECK_DEFAULT: 'if command -v task >/dev/null 2>&1 && task --summary shutdown:check >/dev/null 2>&1; then task shutdown:check; elif command -v devhost-shutdown-check >/dev/null 2>&1; then devhost-shutdown-check; else echo "no shutdown check defined; stopping"; fi'
+  _BASH_CLI:
+    sh: 'f="{{.TASKFILE_DIR}}/host/devcontainer-cli.sh"; if [ -f "$f" ]; then echo "$f"; else echo "{{.TASKFILE_DIR}}/../src/devcontainer-cli/devcontainer-cli.sh"; fi'
+  # "1" when Task itself runs inside a container (Docker or Podman marker),
+  # so tasks that mean "run this inside the devcontainer" can run the
+  # command directly instead of through `devcontainer exec`.
+  # DEVCONTAINER_IN_CONTAINER=1 or 0 in the environment overrides the
+  # detection (tests; a container the markers miss).
+  _IN_CONTAINER:
+    sh: 'case "${DEVCONTAINER_IN_CONTAINER:-}" in 1) echo 1 ;; 0) echo "" ;; *) if [ -e /.dockerenv ] || [ -e /run/.containerenv ]; then echo 1; else echo ""; fi ;; esac'
+
+tasks:
+  cli:
+    desc: 'Internal: run one @devcontainers/cli subcommand. vars: SUBCOMMAND, ARGS (string, shell-split), CMD (exec, and stop and prepshutdown for the shutdown check; base64-encoded on the way through), FORCE (stop only).'
+    internal: true
+    interactive: true
+    requires:
+      vars: [SUBCOMMAND]
+    vars:
+      ARGS: '{{.ARGS | default ""}}'
+      # Only exec, stop and prepshutdown take a command: a CMD given on the command line of an
+      # outer task (task exec CMD=ls) must not reach the up that runs before it.
+      CMD: '{{if or (eq .SUBCOMMAND "exec") (eq .SUBCOMMAND "stop") (eq .SUBCOMMAND "prepshutdown")}}{{.CMD | default ""}}{{end}}'
+      FORCE: '{{if eq .SUBCOMMAND "stop"}}{{.FORCE | default ""}}{{end}}'
+    cmds:
+      - cmd: pwsh -NoLogo -NoProfile -File '{{.TASKFILE_DIR}}/host/Invoke-DevcontainerCli.ps1' -WorkspaceFolder '{{.WORKSPACE_FOLDER}}' {{._PS_SETTINGS}} {{._PS_HOST_SETTINGS}} -Subcommand '{{.SUBCOMMAND}}' -CliArgsB64 '{{.ARGS | splitArgs | toJson | b64enc}}' {{if .CMD}}-CommandB64 '{{.CMD | b64enc}}'{{end}} {{if .FORCE}}-Force{{end}}
+        platforms: [windows]
+      - cmd: '{{._SH_SETTINGS}} bash ''{{._BASH_CLI}}'' run ''{{.SUBCOMMAND}}'' --workspace-folder ''{{.WORKSPACE_FOLDER}}'' {{if .CMD}}--cmd-b64 ''{{.CMD | b64enc}}''{{end}} {{if .FORCE}}--force{{end}} -- {{.ARGS}}'
+        platforms: [linux, darwin]
+
+  host:
+    desc: 'Show the host profile without starting anything: HOST_TYPE as resolved and why, the HOST_TYPE_PRIORITY list used, the engine command, the DCF_HOST_TYPE, DCF_HOST_HOME, DCF_HOST_SSH_AGENT and DCF_HOST_CLOUD_FOLDER values the launcher sets before it runs the CLI, the FUSE grant when DCF_HOST_FUSE asks for it (and a warning when devcontainer.json lacks its runArgs lines; on windows-wslc the grant is refused with the reason), what DCF_HOST_AUDIO=wslg would do (or why this host cannot), and the host mounts `up` would add (and those it would skip because devcontainer.json already mounts the target; HOST_MOUNTS=false turns them off). HOST_TYPE=<id> or HOST_TYPE_PRIORITY=<ids> on the command line try other choices.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: host
+
+  ssh-add:
+    desc: 'Run the HOST''s ssh-add (a one-shot: it runs and exits, nothing is left running) with the arguments after --, no arguments = ssh-add -l: load a key into the host agent that the ssh-agent Feature''s socket mode forwards (linux, macos, windows-wsl-docker from a distro), e.g. task dc:ssh-add -- ~/.ssh/id_ed25519. On Windows it runs the Windows OpenSSH ssh-add and says that the container cannot reach that agent on this host type; use task devcontainer:openbao-ssh-import (the key into OpenBao) there. Runs from the host only.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:ssh-add runs from the host: this Task is inside the container (use task ssh-agent:keys here)." >&2; exit 1{{else}}:{{end}}'
+      - cmd: 'echo "note: the container cannot reach the Windows OpenSSH agent on this host type (a named pipe, and no process of ours is left running on the host to bridge it). To sign in the container, use task devcontainer:openbao-ssh-import FILE=<private key> (into OpenBao in the container), or a VS Code terminal." >&2'
+        platforms: [windows]
+      - cmd: 'ssh-add {{.CLI_ARGS | default "-l"}}'
+
+  ssh-key-import:
+    desc: 'Deprecated (goes with ssh-agent 2.0; use task devcontainer:openbao-ssh-import, which puts the key in OpenBao). Opt-in key mode (it puts a private key in the container''s key volume, which breaks "the key never enters the container"; mainly for windows-docker and windows-wslc): read the private key file FILE=<path on the host> and stream it into the running container through devcontainer exec on stdin (never as an argument, never into a log or the process list), where the ssh-agent Feature stores it in its key volume with mode 0600 (and the .pub beside it, when there is one), then loads it; prints the fingerprint, never the key. Warns on the host (never blocks) when FILE has a default name or its public key also opens this host (in ~/.ssh/authorized_keys, or the same as another ~/.ssh/*.pub). Refuses when FILE is missing, when no container runs (start it with task dc:start), or when key mode is off in the container (Feature option keyMode: true, or SSH_AGENT_MODE=key at task dc:up). Runs from the host only.'
+    requires:
+      vars: [FILE]
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:ssh-key-import runs from the host: this Task is inside the container (use task ssh-agent:key:add FILE=<path> here)." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: ssh-key-import
+          ARGS: '{{.FILE | shellQuote}}'
+
+  openbao-ssh-import:
+    desc: 'Import a private key of this workstation into OpenBao in the running container (the openbao Feature 1.3.0 or later, its server unsealed and you logged in there with task openbao:login): read FILE=<path on the host> and stream it through devcontainer exec on stdin (never as an argument, never into a log or the process list) into task openbao:ssh:import FROM=file, which stores it as ssh/<NAME> (default the file name) and adds its public key to the repository''s .devcontainer/allowed_signers; prints the fingerprint, never the key. A one-shot: nothing is left running on the host. Warns on the host (never blocks) when FILE has a default name or its public key also opens this host. Refuses when FILE is missing, when no container runs (start it with task dc:start), or when the container refuses (sealed, logged out, the name taken, a key with a passphrase: import that one inside the container, where ssh-keygen asks for it). Then load it for a sitting with task ssh-agent:key:load NAME=ssh/<NAME> in the container. Runs from the host only.'
+    requires:
+      vars: [FILE]
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao-ssh-import runs from the host: this Task is inside the container (use task openbao:ssh:import FROM=file FILE=<path> here)." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-ssh-import
+          ARGS: '{{.FILE | shellQuote}} {{.NAME | default "" | shellQuote}}'
+
+  cloud-folder-login:
+    desc: 'Sign in the cloud-folder Feature''s remote (SharePoint or OneDrive) from the workstation; also task cloud-folder:login when the root Taskfile includes the launcher''s cloud-folder.yml. The devcontainer must run (task devcontainer:start). Default: a listener on this workstation''s 127.0.0.1:53682 (the fixed address rclone''s sign-in returns to), only for the sign-in, relays each request of the browser into the container through `<engine> exec` and bash''s /dev/tcp (no port mapping, nothing in devcontainer.json), the container''s login runs rclone authorize there, and the default browser opens the sign-in; the listener closes when the login ends, fails or after CLOUD_FOLDER_LOGIN_TIMEOUT seconds (default 600). When 53682 is busy here (or, on Linux and macOS, there is no python3 for the listener) it says so and takes the paste route. -- --paste: sign in by pasting the address the browser fails to open afterwards. -- --workstation-rclone: download the pinned rclone (the repository''s cloud-folder rcloneVersion, else the Feature''s default) once into the launcher cache, verified against the release''s SHA256SUMS, run rclone authorize "onedrive" here and hand the token to the container on stdin. Inside the container it runs the Feature''s login directly.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}cloud-folder-setup login {{.CLI_ARGS}}{{else}}:{{end}}'
+      - cmd: '{{if ._IN_CONTAINER}}:{{else}}pwsh -NoLogo -NoProfile -File ''{{.TASKFILE_DIR}}/host/Invoke-DevcontainerCli.ps1'' -WorkspaceFolder ''{{.WORKSPACE_FOLDER}}'' {{._PS_SETTINGS}} {{._PS_HOST_SETTINGS}} -Subcommand cloud-folder-login -CliArgsB64 ''{{.CLI_ARGS | splitArgs | toJson | b64enc}}''{{end}}'
+        platforms: [windows]
+      - cmd: '{{if ._IN_CONTAINER}}:{{else}}{{._SH_SETTINGS}} bash ''{{._BASH_CLI}}'' run cloud-folder-login --workspace-folder ''{{.WORKSPACE_FOLDER}}'' -- {{.CLI_ARGS}}{{end}}'
+        platforms: [linux, darwin]
+
+  openbao:unlock:
+    desc: 'Unseal OpenBao in the running devcontainer and log the Operator in with this workstation''s OpenBao key file (the openbao Feature 1.5.0 or later with unlock: keyfile), nothing typed: the step every task devcontainer:up (so start, shell, exec, agent, claude, rebuild) runs on its own, for a container started another way (VS Code). Asks openbao-setup unlock --status through the engine''s exec, and when the server is sealed or the token is not live streams the key file (DPAPI, opened in memory) into openbao-setup unlock --stdin; never an argument, an environment variable or a file. Says so and does nothing when the Feature is not in keyfile mode or OpenBao is ready; names task devcontainer:openbao:keyfile:create when this workstation has no key file for that server. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:unlock runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-unlock
+
+  openbao:keyfile:create:
+    desc: 'Make the OpenBao key file for the running devcontainer''s OpenBao (the openbao Feature 1.5.0 or later with unlock: keyfile), once: on today''s server, type two custody shares at hidden prompts; on an uninitialised one nothing is typed. The container prepares five shares, threshold two (or initialises so) and the operator AppRole as a pending rotation; shares 4 and 5 and the login are saved here with DPAPI in %LOCALAPPDATA%\devcontainer-features-keys\openbao\<repo>-<cluster id>.keyfile first, the rotation is then confirmed with them (a failed save or confirm cancels it and the old shares stay), and only then are custody shares 1 to 3 printed once: store them again, and keep the previous ones until the backups made under them are pruned. Refuses (exit 3) when CLAUDECODE, DEVHOST_JOB_CHILD or a name in OPENBAO_AGENT_JOB_VARS is set on the workstation: run it yourself in a plain terminal. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:keyfile:create runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-keyfile
+          ARGS: 'create'
+
+  openbao:keyfile:rotate:
+    desc: 'New unseal shares and a new AppRole secret id for the running devcontainer''s OpenBao (after a suspected copy of the key file, after a restore or an onboarding claim, or once agents run as their own Linux user): with this workstation''s OpenBao key file for that server nothing is typed, else type any two of the five shares. Saves the new key file, confirms the rotation with it (a failed save or confirm cancels it and puts the previous key file back), then prints the three new custody shares once (keep the previous ones until the backups made under them are pruned). Refuses (exit 3) when CLAUDECODE, DEVHOST_JOB_CHILD or a name in OPENBAO_AGENT_JOB_VARS is set on the workstation: run it yourself in a plain terminal. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:keyfile:rotate runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-keyfile
+          ARGS: 'rotate'
+
+  openbao:keyfile:export:
+    desc: 'Write this repository''s OpenBao key file to FILE=<path outside the checkout>, encrypted with a one-time transfer passphrase printed once here (AES-256-GCM, PBKDF2-SHA256), for task devcontainer:openbao:keyfile:import on a second workstation that restores this server''s backups. SERVER=<cluster id> when this workstation has key files for several servers. Refuses a FILE that exists or lies inside the checkout. Carry the file and the passphrase by different routes. Refuses (exit 3) when CLAUDECODE, DEVHOST_JOB_CHILD or a name in OPENBAO_AGENT_JOB_VARS is set on the workstation: run it yourself in a plain terminal. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:keyfile:export runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-keyfile
+          ARGS: 'export --file {{.FILE | default "" | shellQuote}} --server {{.SERVER | default "" | shellQuote}}'
+
+  openbao:keyfile:import:
+    desc: 'Read a transfer file that task devcontainer:openbao:keyfile:export wrote (FILE=<path>), ask its one-time transfer passphrase at a hidden prompt, save the OpenBao key file with this workstation''s DPAPI and delete the transfer file. Refuses when this workstation has a key file for that server already (forget it first); a wrong passphrase changes nothing. Refuses (exit 3) when CLAUDECODE, DEVHOST_JOB_CHILD or a name in OPENBAO_AGENT_JOB_VARS is set on the workstation: run it yourself in a plain terminal. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:keyfile:import runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-keyfile
+          ARGS: 'import --file {{.FILE | default "" | shellQuote}}'
+
+  openbao:keyfile:forget:
+    desc: 'Delete this repository''s OpenBao key file on this workstation (SERVER=<cluster id> when it has several), after a y at the prompt: OpenBao then unseals only with two custody shares (task openbao:unseal in the container). Its shares 4 and 5 keep opening the server and its backups until task devcontainer:openbao:keyfile:rotate; to go back to typing set the openbao option unlock: operator. Windows (pwsh) only for now; the bash launcher says so in one line.'
+    interactive: true
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:openbao:keyfile:forget runs from the workstation: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: openbao-keyfile
+          ARGS: 'forget --server {{.SERVER | default "" | shellQuote}}'
+
+  run:
+    desc: 'Internal: run CMD inside the devcontainer - directly when Task already runs inside it, through the exec task (which starts the container first) from the host. What claude and similar "inside" tasks use.'
+    internal: true
+    interactive: true
+    requires:
+      vars: [CMD]
+    cmds:
+      # Decided in the template, not with a per-command `if:` (Task 3.45
+      # ignores that key). The host branch re-enters Task so the exec task's
+      # platform dispatch applies; the namespace is taken from this task's
+      # own name, so the include may be mounted under any namespace.
+      - cmd: '{{if ._IN_CONTAINER}}{{.CMD}}{{else}}task {{regexReplaceAll ":[^:]+$" .TASK ""}}:exec CMD={{.CMD | shellQuote}}{{end}}'
+
+  init:
+    desc: 'Prepare the host side once: cache the portable Node.js + @devcontainers/cli (Windows: %LOCALAPPDATA%\devcontainer-features; Linux/macOS: ~/.cache/devcontainer-features, skipped when `devcontainer` is already on PATH) and report the container engine. Nothing is installed globally. FORCE=true reinstalls the cached CLI.'
+    vars:
+      FORCE: '{{.FORCE | default "false"}}'
+    cmds:
+      - cmd: pwsh -NoLogo -NoProfile -File '{{.TASKFILE_DIR}}/host/Initialize-DevcontainerCli.ps1' {{._PS_SETTINGS}} {{if eq .FORCE "true"}}-Force{{end}}
+        platforms: [windows]
+      - cmd: '{{._SH_SETTINGS}} bash ''{{._BASH_CLI}}'' init {{if eq .FORCE "true"}}--force{{end}}'
+        platforms: [linux, darwin]
+
+  homes:
+    desc: 'Create the host-side folders that devcontainer.json bind-mounts for tool state (Claude Code config, gh/az logins): <DEVCONTAINER_HOMES or ~/.devcontainer-homes>/<NAME>/<dir> for each dir after --, so a start never fails on a missing mount source; also creates ~/.git-dirs (%USERPROFILE%\.git-dirs), the source of the git Feature''s one .git-dirs mount. Use as initializeCommand: task devcontainer:homes NAME=myrepo -- claude gh. Optional HOST_GIT_DIR=<path> also checks that a git dir kept outside the checkout has a HEAD.'
+    requires:
+      vars: [NAME]
+    vars:
+      DEVCONTAINER_HOMES: '{{.DEVCONTAINER_HOMES | default ""}}'
+      HOST_GIT_DIR: '{{.HOST_GIT_DIR | default ""}}'
+    cmds:
+      - cmd: pwsh -NoLogo -NoProfile -File '{{.TASKFILE_DIR}}/host/Initialize-DevcontainerHomes.ps1' -Name '{{.NAME}}' -Root '{{.DEVCONTAINER_HOMES}}' -GitDir '{{.HOST_GIT_DIR}}' -Dirs '{{.CLI_ARGS}}'
+        platforms: [windows]
+      - cmd: bash '{{.TASKFILE_DIR}}/host/devcontainer-homes.sh' --name '{{.NAME}}' {{if .DEVCONTAINER_HOMES}}--root '{{.DEVCONTAINER_HOMES}}' {{end}}{{if .HOST_GIT_DIR}}--git-dir '{{.HOST_GIT_DIR}}' {{end}}-- {{.CLI_ARGS}}
+        platforms: [linux, darwin]
+
+  up:
+    aliases: [start]
+    desc: 'Build (if needed) and start the devcontainer for {{.WORKSPACE_FOLDER}}, adding the host mounts of the host type (HOST_MOUNTS=false: none); also task devcontainer:start. Idempotent: starts a stopped container, does nothing to a running one, so other tasks can require it. Extra `devcontainer up` flags after --, e.g. task devcontainer:up -- --remove-existing-container.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: up
+          ARGS: '{{.CLI_ARGS}}'
+
+  running:
+    desc: 'Silent test: the script exits 0 when a container of {{.WORKSPACE_FOLDER}} is running, 1 when none is, 2 when the engine cannot be asked. Task itself reports a failed command as 201 unless called as `task --exit-code devcontainer:running`, which passes 0/1/2 through. Never starts anything.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: running
+
+  stop:
+    aliases: [down]
+    desc: 'Stop the devcontainer for {{.WORKSPACE_FOLDER}} through the configured engine; also task devcontainer:down. One host-script command: with no running container it says so and succeeds, without running the check or starting anything. Otherwise runs the shutdown check inside the container first (STOP_CHECK, else the repository''s `task shutdown:check`, else devhost-shutdown-check, else none and the stop goes ahead; see bootstrap/SHUTDOWN.md); a failing check refuses the stop (its exit code), FORCE=1 stops anyway. Only this route is guarded: stopping the container with the engine directly is not (see the shutdown-devhost skill).'
+    vars:
+      FORCE: '{{.FORCE | default ""}}'
+      STOP_CHECK: '{{.STOP_CHECK | default ._SHUTDOWN_CHECK_DEFAULT}}'
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:stop runs from the host: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: stop
+          CMD: '{{.STOP_CHECK}}'
+          FORCE: '{{.FORCE}}'
+
+  prepshutdown:
+    desc: 'Run the shutdown check (STOP_CHECK, else the repository''s `task shutdown:check`, else devhost-shutdown-check, else none) inside the running container without stopping it, to see what a stop would refuse; exits with the check''s code. With no running container it says so and succeeds. See bootstrap/SHUTDOWN.md.'
+    vars:
+      STOP_CHECK: '{{.STOP_CHECK | default ._SHUTDOWN_CHECK_DEFAULT}}'
+    cmds:
+      - cmd: '{{if ._IN_CONTAINER}}echo "devcontainer:prepshutdown runs from the host: this Task is inside the container." >&2; exit 1{{else}}:{{end}}'
+      - task: cli
+        vars:
+          SUBCOMMAND: prepshutdown
+          CMD: '{{.STOP_CHECK}}'
+
+  rebuild:
+    desc: 'Recreate the devcontainer from scratch (devcontainer up --remove-existing-container --build-no-cache). Stops it first exactly like devcontainer:stop (shutdown check included; STOP_CHECK passes through): when that stop is refused or fails, nothing is rebuilt; FORCE=1 skips the check, as for stop. VS Code windows attached to the old container must reload.'
+    cmds:
+      - cmd: 'task {{regexReplaceAll ":[^:]+$" .TASK ""}}:stop {{if .FORCE}}FORCE=''{{.FORCE}}'' {{end}}{{if .STOP_CHECK}}STOP_CHECK=''{{.STOP_CHECK}}'' {{end}}|| { echo "Not rebuilding: the stop above did not complete. Fix what it names, or run again with FORCE=1." >&2; exit 1; }'
+      - task: cli
+        vars:
+          SUBCOMMAND: up
+          ARGS: '--remove-existing-container --build-no-cache'
+
+  lock:
+    desc: 'Rewrite .devcontainer/devcontainer-lock.json to the Feature versions devcontainer.json asks for now (devcontainer upgrade), so a changed version or tag is locked again; run it after editing a Feature version, then commit the lock file. Features referenced by a local path are never locked. Runs from the host; no container needed.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: upgrade
+          ARGS: '{{.CLI_ARGS}}'
+
+  outdated:
+    desc: 'List the Features in devcontainer.json whose locked version is older than the newest one their version or tag allows (devcontainer outdated); task lock updates them. Runs from the host; no container needed.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: outdated
+          ARGS: '{{.CLI_ARGS}}'
+
+  build:
+    desc: 'Build the devcontainer image without starting a container (validates devcontainer.json and every Feature install).'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: build
+          ARGS: '{{.CLI_ARGS}}'
+
+  _exec:
+    desc: 'Internal: devcontainer exec of CMD with no up first; exec runs it after up.'
+    internal: true
+    interactive: true
+    requires:
+      vars: [CMD]
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: exec
+          CMD: '{{.CMD}}'
+
+  exec:
+    desc: 'Run CMD="<command>" inside the devcontainer via bash -lc, as the configured remoteUser, starting the container first (up, idempotent). CMD is base64-encoded on the way through, so nested quotes/newlines need no escaping.'
+    interactive: true
+    requires:
+      vars: [CMD]
+    cmds:
+      - task: up
+      - task: _exec
+        vars:
+          CMD: '{{.CMD}}'
+
+  shell:
+    desc: 'Open an interactive bash login shell inside the devcontainer, starting it first (up, idempotent).'
+    interactive: true
+    cmds:
+      - task: up
+      - task: cli
+        vars:
+          SUBCOMMAND: exec
+          ARGS: 'bash -l'
+
+  pwsh:
+    desc: 'Open PowerShell inside the devcontainer (needs the powershell Feature; shell opens bash), starting it first (up, idempotent).'
+    interactive: true
+    cmds:
+      - task: up
+      - task: cli
+        vars:
+          SUBCOMMAND: exec
+          ARGS: 'pwsh -NoLogo'
+
+  agent:
+    desc: 'Start an agent of the repository''s agent list inside the devcontainer (the agents Feature: task agents -- <name>), starting the container first (through exec, which runs up; idempotent): task devcontainer:agent -- <name> [--resume|--new] [extra CLI args]. A resident agent is made to run in the background and attached; an on-demand agent opens a new session in this terminal. No name starts the agent the list marks default: true; from the host, with no name and no such agent in the list, it refuses before starting the container. AGENTS_FILE=<repo-relative path> (before the --) picks another list than .devcontainer/agents.yml. Runs directly when already inside the container.'
+    interactive: true
+    vars:
+      # "1" when the arguments name no agent (none, or they start with an option such as --resume).
+      _NAMELESS: '{{$a := splitArgs (.CLI_ARGS | default "")}}{{if or (eq (len $a) 0) (hasPrefix "-" (index $a 0))}}1{{end}}'
+      _AGENTS_LIST: '{{.AGENTS_FILE | default ".devcontainer/agents.yml"}}'
+    cmds:
+      # From the host with no name: the agent list must mark a default, else `agents start` inside
+      # would refuse only after a whole `up`. A plain line match in the shell Task runs on every
+      # platform (no grep on Windows); a list that is missing or cannot be read is let through, so
+      # a valid list is never refused (the Feature then says what is wrong).
+      - cmd: >-
+          {{if and (not ._IN_CONTAINER) ._NAMELESS}}f={{printf "%s/%s" .WORKSPACE_FOLDER ._AGENTS_LIST | shellQuote}};
+          [ -f "$f" ] || exit 0;
+          while IFS= read -r l || [ -n "$l" ]; do case "$l" in *default:*true*) exit 0 ;; esac; done < "$f";
+          echo {{printf "devcontainer:agent needs an agent name: task devcontainer:agent -- <name> [--resume|--new] [extra CLI args] (or mark one agent default: true in %s). Nothing was started." ._AGENTS_LIST | shellQuote}} >&2;
+          exit 2{{else}}:{{end}}
+        silent: true
+      - task: run
+        vars:
+          CMD: '{{if .AGENTS_FILE}}AGENTS_FILE_TASK_VAR={{.AGENTS_FILE | shellQuote}} {{end}}agents start {{.CLI_ARGS}}'
+
+  agent:list:
+    desc: 'List the agents of the repository''s agent list with their kind, CLI, state and session id (the agents Feature: task agents:list), starting the container first; -- --json for a JSON array. Runs directly when already inside the container.'
+    cmds:
+      - task: run
+        vars:
+          CMD: '{{if .AGENTS_FILE}}AGENTS_FILE_TASK_VAR={{.AGENTS_FILE | shellQuote}} {{end}}agents list {{.CLI_ARGS}}'
+
+  agent:reset:
+    desc: 'Tidy the listed agents'' sessions inside the devcontainer (the agents Feature: task agents:reset), starting the container first: task devcontainer:agent:reset -- <name>... | --all [--purge] [--include-unlisted] [--yes] [--force]. A dry run that prints the plan unless --yes. Runs directly when already inside the container (refused from inside a Claude Code session).'
+    interactive: true
+    cmds:
+      - task: run
+        vars:
+          CMD: '{{if .AGENTS_FILE}}AGENTS_FILE_TASK_VAR={{.AGENTS_FILE | shellQuote}} {{end}}agents reset {{.CLI_ARGS}}'
+
+  claude:
+    desc: 'Deprecated: use task devcontainer:agent -- <name> (the agents Feature); goes with claude-code 2.0. Start or resume the Claude Code host session inside the devcontainer (claude-host from the claude-code Feature), starting the container first (through exec, which runs up; idempotent): the session named by HOST_SESSION in .devcontainer/.env is resumed by UUID, or created the first time; unset, a plain new session. DIR=<sub-folder> starts there and reads HOST_SESSION_<DIR> instead (e.g. DIR=rooms/solis -> HOST_SESSION_SOLIS); SESSION=<uuid> overrides both. Extra arguments after --: task devcontainer:claude -- --model sonnet. Runs directly when already inside the container.'
+    interactive: true
+    vars:
+      DIR: '{{.DIR | default ""}}'
+      _SESSION_VAR: 'HOST_SESSION{{if .DIR}}_{{.DIR | base | upper | regexReplaceAll "[^A-Z0-9]" "_"}}{{end}}'
+      _SESSION_FROM_ENV:
+        sh: 'printf %s "${{"{"}}{{._SESSION_VAR}}:-${HOST_SESSION:-}}"'
+      SESSION: '{{.SESSION | default ._SESSION_FROM_ENV}}'
+    cmds:
+      - cmd: 'echo "devcontainer:claude is deprecated: use task devcontainer:agent -- <name> (the agents Feature, .devcontainer/agents.yml); it goes with claude-code 2.0." >&2'
+      - task: run
+        vars:
+          CMD: '{{if .DIR}}cd ''{{.DIR}}'' && {{end}}HOST_SESSION=''{{.SESSION}}'' claude-host {{.CLI_ARGS}}'
+
+  claude:fleet:
+    desc: 'Deprecated: use the agent list and task devcontainer:agent (the agents Feature; residents start with the container); goes with claude-code 2.0. Several Claude Code sessions in one terminal, never a second copy of one (claude-fleet from the claude-code Feature, which needs the claude-code Feature''s claude-host and Claude Code with `claude agents --json`): SESSIONS, set by the including Taskfile (include vars), has one line per session, name|session-variable|dir|extra claude args. A session counts as running when its id (the variable''s value, from .devcontainer/.env first, then the container''s environment) or its folder is live in `claude agents --json`; the others are started in the background with claude-host --bg in their folder; then `claude agents` opens. It first waits until sessions restored after a rebuild are stable (-- --no-wait skips that). Several live sessions for one agent are reported; -- --stop-duplicates stops the extras with `claude stop` (never rm). -- --plan prints what it would do and starts nothing; -- --no-view starts the missing ones without opening the view. Starts the container first; runs directly when already inside it.'
+    interactive: true
+    preconditions:
+      - sh: '[ -n "{{.SESSIONS | default "" | trim}}" ]'
+        msg: 'devcontainer:claude:fleet needs SESSIONS, the list of sessions to keep running, one per line: name|session-variable|dir|extra claude args. Set it in the vars of your root Taskfile''s devcontainer include, e.g. SESSIONS: "host|HOST_SESSION|.|" (see the claude-code Feature NOTES, "Fleet"). A repository with one session uses task devcontainer:claude instead.'
+    cmds:
+      - cmd: 'echo "devcontainer:claude:fleet is deprecated: list the agents in .devcontainer/agents.yml and use task devcontainer:agent (the agents Feature); it goes with claude-code 2.0." >&2'
+      # SESSIONS travels base64-encoded: its lines hold | and spaces, and the
+      # command is quoted again by exec and the host shell.
+      - task: run
+        vars:
+          CMD: 'SESSIONS_B64=''{{.SESSIONS | default "" | b64enc}}'' claude-fleet {{.CLI_ARGS}}'
+
+  config:
+    desc: 'Print the fully resolved devcontainer configuration (devcontainer read-configuration --include-merged-configuration).'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: read-configuration
+          ARGS: '--include-merged-configuration'
+
+  reset-storage:
+    desc: 'wslc.exe only: reset WSL Containers'' backing storage after a "read-only file system" BuildKit error. Destroys ALL wslc images and containers. Windows-only.'
+    platforms: [windows]
+    cmds:
+      - pwsh -NoLogo -NoProfile -File '{{.TASKFILE_DIR}}/host/Reset-WslcStorage.ps1'
+
+  '*':
+    desc: 'Passthrough: the part after "devcontainer:" becomes the @devcontainers/cli subcommand, args after --. e.g. task devcontainer:outdated, task devcontainer:features -- test -f go-task.'
+    cmds:
+      - task: cli
+        vars:
+          SUBCOMMAND: '{{index .MATCH 0}}'
+          ARGS: '{{.CLI_ARGS}}'

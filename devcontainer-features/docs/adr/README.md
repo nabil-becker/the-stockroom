@@ -1,0 +1,138 @@
+# Architecture decision records
+
+An ADR is for the decision whose reasoning does not fit in a line: options were weighed, the
+consequences need spelling out, or someone will ask "why" in a year and the answer should not
+depend on who remembers.
+
+## When to write one
+
+Write an ADR when at least one of these is true:
+
+- two or more real options were considered and the losing ones deserve a record;
+- the decision constrains how people work (branching, tooling, review) or how the system is
+  shaped (a boundary, a protocol, a storage choice);
+- the consequences include something to undo later, or a cost someone else pays.
+
+Do not write one for a choice a backlog item or a ledger entry states completely.
+
+## Format
+
+`devhost-adr <title words>` (or `task devhost:adr -- <title words>`) creates the next record
+from [0000-template.md](0000-template.md) and adds its row below. The sections are fixed:
+
+| Section | What goes there |
+|---|---|
+| header table | status, date, deciders |
+| Context | the situation and the forces at work, with their sources |
+| Decision | what was decided, in full sentences, present tense |
+| Options considered | each option with the reason it lost; the chosen one too |
+| Consequences | what becomes easier, what becomes harder, what must be done as a result |
+| Change log | one row per revision of the ADR |
+
+Nothing in an ADR names a person other than as "the Operator", holds credentials, identifiers
+or real data; nothing is silently deleted.
+
+## Numbering and lifecycle
+
+- Files are `NNNN-short-title.md`, numbered in creation order from 0001; `0000` is the template.
+  Numbers are never reused.
+- Status moves `proposed` to `accepted` (the Operator confirms) or `rejected`. A later ADR that
+  replaces an earlier one sets the earlier one to `superseded by ADR-NNNN`; the text of the
+  earlier one is not edited beyond that status line. The librarian back may add new records and
+  change a status line, nothing else; its guard undoes anything more.
+- An accepted ADR changes only through a new ADR.
+
+`devhost-verify` checks that every ADR has the required sections, a known status, consecutive
+numbering and a row below.
+
+## Index
+
+| ADR | Title | Status | Date |
+|---|---|---|---|
+| [0001](0001-agent-git-identity-through-containerenv.md) | Agent git identity is set through containerEnv | superseded by 0012 | 2026-10-16 |
+| [0002](0002-agent-co-author-trailers-use-unclaimable-addresses.md) | Agent co-author trailers use unclaimable per-model addresses | accepted | 2026-10-16 |
+| [0003](0003-backs-only-add-so-change-stakes-become-amend-items.md) | Backs only add, so a stake that asks for a change becomes an amend item | accepted | 2026-10-16 |
+| [0004](0004-the-arthurian-theme-is-a-layer-not-a-rename.md) | The Arthurian theme is a layer over the plain words, not a rename | superseded by ADR-0023 | 2026-10-16 |
+| [0005](0005-the-ontology-is-the-canonical-model-and-a-guard-keeps-the-rest-in-line.md) | The ontology is the canonical model, and a guard keeps the rest in line | accepted | 2026-10-16 |
+| [0006](0006-the-docs-site-is-built-by-a-script-and-hosting-is-a-swappable-skill.md) | The docs site is built by a script, and hosting is a swappable skill | accepted | 2026-10-16 |
+| [0007](0007-the-life-theme-is-a-shared-layer-above-each-projects-own.md) | The life theme is a shared layer above each project's own theme | accepted | 2026-10-16 |
+| [0008](0008-the-iteration-package-carries-papers-forward-and-merges-the-foundation.md) | The iteration package carries papers forward, merges the foundation, and its papers are honest accounts | accepted | 2026-10-16 |
+| [0009](0009-the-journalist-is-a-skill-in-the-iteration-package-not-a-back.md) | The journalist is a skill in the iteration package, not a back | superseded by 0014 | 2026-10-17 |
+| [0010](0010-a-paper-carrying-names-is-committed-under-an-approved-exception.md) | A paper that carries names is committed unchanged under an approved exception | accepted | 2026-10-19 |
+| [0011](0011-the-feature-and-agent-principles-are-binding.md) | The agent principles and the Feature requirements are binding | accepted | 2026-10-19 |
+| [0012](0012-agent-git-identity-through-the-git-feature-wrapper.md) | Agent git identity is set by the git Feature's wrapper | accepted | 2026-10-19 |
+| [0013](0013-the-agent-principles-are-trimmed-to-five-generic-ones.md) | The agent principles are trimmed to five generic ones | accepted | 2026-10-20 |
+| [0014](0014-the-seed-is-exported-and-imported-by-two-skills-and-the-journalist-is-folded-into-the-export.md) | The seed is exported and imported by two skills, and the journalist is folded into the export | accepted | 2026-10-20 |
+| [0015](0015-shutdown-is-a-check-script-a-skill-and-a-host-stop-task-because-the-spec-has-no-stop-hook.md) | Shutdown is a check script, a skill and a host stop task, because the spec has no stop hook | accepted | 2026-10-20 |
+| [0016](0016-the-bot-identity-applies-only-to-git-run-by-an-agent.md) | The bot identity applies only to git run by an agent | accepted | 2026-10-20 |
+| [0017](0017-every-branch-name-carries-a-backlog-id-and-a-workstream-number.md) | Every branch name carries a backlog id and a workstream number | accepted | 2026-10-20 |
+| [0018](0018-start-and-stop-are-idempotent-prerequisites-and-rebuild-continues-after-a-failed-stop.md) | Start and stop are idempotent prerequisites, and rebuild continues after a failed stop | accepted | 2026-10-21 |
+| [0019](0019-the-ledger-review-runs-every-25-entries-and-the-entry-rate-is-tracked.md) | The ledger review runs every 25 entries, and the entry rate is tracked | superseded by 0021 | 2026-10-21 |
+| [0020](0020-consuming-repos-mount-the-whole-git-dirs-folder-and-the-git-wrapper-maps-the-pointer.md) | Consuming repos mount the whole git-dirs folder, and the git wrapper maps the pointer | accepted | 2026-10-21 |
+| [0021](0021-the-ledger-review-runs-every-75-entries.md) | The ledger review runs every 75 entries | accepted | 2026-10-21 |
+| [0022](0022-the-shutdown-check-is-resolved-in-the-container-from-a-task-contract.md) | The shutdown check is resolved in the container from a task contract | accepted | 2026-10-22 |
+| [0023](0023-the-theme-is-a-bar.md) | The theme is a bar | accepted | 2026-10-23 |
+| [0024](0024-the-host-is-an-adapter-owned-by-devcontainer-cli.md) | The host is an adapter owned by devcontainer-cli | accepted | 2026-10-23 |
+| [0025](0025-the-devhost-feature-is-local-only-and-lives-outside-src.md) | The devhost Feature is local-only and lives outside `src/` | accepted (amended by 0044) | 2026-10-23 |
+| [0026](0026-a-one-shot-command-run-on-the-host-is-allowed-a-background-process-is-not.md) | A one-shot command run on the host is allowed, a background process is not | accepted | 2026-10-24 |
+| [0027](0027-ci-runs-task-lint-inside-the-devcontainer-and-the-tool-versions-are-pinned.md) | CI runs `task lint` inside the devcontainer, and the tool versions are pinned | accepted | 2026-10-24 |
+| [0028](0028-claude-host-refuses-a-second-live-session-and-a-hook-writes-the-pin-back.md) | claude-host refuses a second live session, and an opt-in hook writes the pin back | accepted | 2026-10-24 |
+| [0029](0029-key-rotation-is-one-command-and-keeps-the-old-key-registered-unless-revoked.md) | Key rotation is one command, and it keeps the old key registered unless revoked | accepted | 2026-10-24 |
+| [0030](0030-claude-fleet-waits-for-restored-sessions-and-stops-extras-but-never-removes-them.md) | claude-fleet waits for restored sessions, and stops extras but never removes them | accepted | 2026-10-24 |
+| [0031](0031-the-launcher-grants-fuse-on-request-and-the-cloud-folder-mode-is-chosen-in-the-container.md) | The launcher grants FUSE on request, and the cloud-folder mode is chosen in the container | accepted | 2026-10-27 |
+| [0032](0032-extra-working-folders-are-written-to-claude-codes-managed-settings-not-the-users-settings-file.md) | Extra working folders are written to Claude Code's managed settings, not the user's settings file | accepted | 2026-10-28 |
+| [0033](0033-the-agent-adapter-remembers-the-session-id-and-a-reset-never-deletes-by-default.md) | The agent adapter remembers the session id, and a reset never deletes by default | accepted | 2026-10-28 |
+| [0034](0034-every-build-time-download-goes-through-the-vendored-dcf-curl-and-a-lint-check-enforces-it.md) | Every build-time download goes through the vendored `dcf_curl`, and a lint check enforces it | accepted | 2026-10-28 |
+| [0035](0035-a-feature-that-ships-a-check-or-transform-tool-gives-it-the-linter-cli-contract.md) | A Feature that ships a check or transform tool gives it the linter CLI contract | accepted | 2026-10-29 |
+| [0036](0036-a-stateful-agent-holds-an-exclusive-lease-and-integrations-plug-in-through-agent-integration-executables.md) | A stateful agent holds an exclusive lease, and integrations plug in through `agent-integration-<id>` executables | accepted | 2026-10-29 |
+| [0037](0037-a-contract-for-agent-clis-must-work-on-two-vendors-or-name-its-fallback.md) | A contract for agent CLIs must work on two vendors or name its fallback (amends ADR-0036) | accepted | 2026-10-29 |
+| [0038](0038-one-cloud-folder-login-task-finds-out-where-it-runs-and-opens-the-sign-in-port-only-while-signing-in.md) | One cloud-folder login task finds out where it runs and opens the sign-in port only while signing in | proposed | 2026-10-29 |
+| [0039](0039-an-architecture-review-comes-before-every-ruling-and-nfr-13-says-we-manage-the-environment-not-the-cli.md) | An architecture review comes before every ruling, and NFR-13 says we manage the environment, not the CLI | accepted | 2026-10-29 |
+| [0040](0040-git-management-is-the-hosts-job-and-the-operator-reviews-merges-and-releases.md) | Git management is the host's job, and the Operator reviews, merges and releases | accepted (merging superseded by 0085) | 2026-10-30 |
+| [0041](0041-a-session-name-is-rendered-by-the-agents-feature-from-a-template-and-passed-to-the-cli-adapter-in-an-environment-variable.md) | A session name is rendered by the agents Feature from a template and passed to the CLI adapter in an environment variable | accepted | 2026-10-30 |
+| [0042](0042-devhost-verify-stays-the-one-commit-check-and-gains-the-aof-checks.md) | devhost-verify stays the one commit check and gains the AOF checks | accepted | 2026-11-01 |
+| [0043](0043-the-aof-planting-keeps-four-local-rules-and-moves-the-ledger-onto-the-register-with-a-mirror-outside-git.md) | The AOF planting keeps four local rules and moves the ledger onto the register with a mirror outside git | accepted | 2026-11-02 |
+| [0044](0044-the-seed-carries-the-devhost-feature-as-files-and-its-starter-references-it-by-local-path.md) | The seed carries the devhost Feature as files, and its starter references it by local path | accepted | 2026-11-02 |
+| [0045](0045-four-storage-tiers-govern-where-data-lives-and-a-machine-loss-must-lose-nothing.md) | Four storage tiers govern where data lives, and losing a machine must lose nothing | accepted (amended by ADR-0049) | 2026-11-03 |
+| [0046](0046-the-operators-register-key-lives-in-ssh-agents-key-mode-and-is-unlocked-for-a-sitting.md) | The Operator's register key lives in ssh-agent's key mode and is unlocked for a sitting | superseded by ADR-0048 | 2026-11-03 |
+| [0047](0047-every-feature-keeps-a-hand-written-changelog-checked-by-lint-and-the-version-bump-stays-in-the-pull-request.md) | Every Feature keeps a hand-written changelog checked by lint, and the version bump stays in the pull request | accepted | 2026-11-03 |
+| [0048](0048-openbao-keeps-every-secret-and-ssh-agent-only-uses-keys-with-a-bounded-loss-exception-to-adr-0045.md) | OpenBao keeps every secret and ssh-agent only uses keys, with a bounded-loss exception to ADR-0045 | accepted | 2026-11-03 |
+| [0049](0049-three-things-adr-0045-did-not-place-are-put-in-tiers-and-custody-and-memory-moves-to-tier-3.md) | Three things ADR-0045 did not place are put in tiers and custody, and Claude Code's memory moves to tier 3 (amends ADR-0045) | accepted | 2026-11-03 |
+| [0050](0050-the-operators-openbao-token-only-reissues-secret-ids-and-creating-or-deleting-a-role-needs-a-root-token-from-the-shares.md) | The Operator's OpenBao token only reissues secret ids, and creating or deleting a role needs a root token made from the shares | accepted | 2026-11-04 |
+| [0051](0051-the-operators-openbao-policy-may-start-and-cancel-a-root-token-attempt-because-openbao-2-7-needs-it-to-make-one-from-the-shares.md) | The Operator's OpenBao policy may start and cancel a root-token attempt, because OpenBao 2.7 needs it to make one from the shares | accepted | 2026-11-04 |
+| [0052](0052-onboarding-hands-over-a-claim-token-and-builds-with-jq-and-defers-pgp-shares.md) | Onboarding hands over a claim token, the OpenBao Feature builds with `jq`, and PGP-encrypted shares are deferred | accepted | 2026-11-04 |
+| [0053](0053-a-pull-request-is-marked-ready-when-the-agents-work-is-done-and-only-with-high-confidence-that-ci-passes.md) | A pull request is marked ready when the agent's work is done, and only with high confidence that CI passes | accepted | 2026-11-04 |
+| [0054](0054-the-ledger-costs-and-backlog-leave-git-for-the-cloud-folder-and-the-ledger-runs-on-the-register.md) | The ledger, costs and backlog leave git for the cloud folder, and the ledger runs on the register | accepted | 2026-11-04 |
+| [0055](0055-the-openbao-server-allows-root-token-generation-without-a-token-on-its-loopback-listener-and-the-shares-flow-uses-curl-not-the-cli.md) | The OpenBao server allows root-token generation without a token on its loopback listener, and the shares flow uses curl, not the CLI | proposed | 2026-11-05 |
+| [0056](0056-an-openbao-key-file-on-the-workstation-unseals-openbao-and-logs-the-operator-in.md) | An OpenBao key file on the workstation unseals OpenBao and logs the Operator in | accepted | 2026-11-05 |
+| [0057](0057-microphone-audio-reaches-the-container-through-an-opt-in-launcher-setting-and-an-audio-feature.md) | Microphone audio reaches the container through an opt-in launcher setting and an `audio` Feature | accepted | 2026-11-06 |
+| [0058](0058-the-microphone-is-gated-by-a-workstation-relay-with-a-ttl-and-is-off-by-default.md) | The microphone is gated by a workstation relay with a TTL and is off by default | accepted | 2026-11-06 |
+| [0059](0059-an-openbao-ssh-certificate-authority-signs-for-the-operator-only-with-roles-of-principal-patterns.md) | An OpenBao SSH certificate authority signs for the Operator only, with roles of principal patterns | accepted | 2026-11-06 |
+| [0060](0060-the-architecture-is-kept-in-a-standing-set-of-six-documents-and-every-proposal-carries-its-deltas.md) | The architecture is kept in a standing set of six documents, and every proposal carries its deltas | accepted | 2026-11-19 |
+| [0061](0061-the-facilitator-is-built-on-agntcy-first-with-the-mcp-split-in-two-and-the-agents-feature-moves-into-a-shared-participant-component.md) | The facilitator is built on AGNTCY first, the MCP connection is split in two, and the agents Feature moves into a shared participant component | accepted | 2026-11-19 |
+| [0062](0062-sign-packet-register-engine-and-packet-relay-move-here-from-aof-and-each-carries-its-own-copy-of-the-signing-library.md) | sign-packet, register-engine and packet-relay move here from AOF, and each carries its own copy of the signing library | accepted | 2026-11-19 |
+| [0063](0063-agentic-components-live-in-a-registry-of-layers-shaped-like-the-windows-registry-and-merge-by-value-type.md) | Agentic components live in a registry of layers, shaped like the Windows Registry, and merge by value type | accepted | 2026-11-19 |
+| [0064](0064-the-cli-contract-gains-an-optional-skills-verb-and-the-component-registry-hands-resolved-skills-to-it-at-an-agent-s-start.md) | The CLI contract gains an optional skills verb and the component registry hands resolved skills to it at an agent's start | accepted | 2026-11-20 |
+| [0065](0065-the-copilot-feature-pins-the-copilot-cli-inside-its-own-dependson-and-stops-the-cli-self-update.md) | The copilot Feature pins the Copilot CLI inside its own `dependsOn` and stops the CLI's self-update | accepted | 2026-11-20 |
+| [0066](0066-the-facilitator-is-reached-only-through-mcp-and-only-a-person-s-continue-resets-the-hop-count.md) | The facilitator is reached only through MCP, and only a person's continue resets the hop count | accepted | 2026-11-20 |
+| [0067](0067-the-facilitator-is-a-network-node-built-as-a-bundle-with-topology-as-configuration-and-trust-levels-over-spiffe.md) | The facilitator is a network node, shipped as a built bundle, with topology as configuration and trust levels over SPIFFE | accepted | 2026-11-20 |
+| [0068](0068-the-node-signs-for-agents-in-its-own-container-a-leaf-client-signs-with-its-own-key-and-an-http-client-is-signed-for-by-the-node.md) | The node signs for agents in its own container, a leaf client signs with its own key, and an HTTP client is signed for by the node (amends ADR-0067) | accepted | 2026-11-20 |
+| [0069](0069-node-certificates-are-issued-by-an-openbao-pki-per-trust-domain-and-two-locks-keep-each-trust-level-apart.md) | Node certificates are issued by an OpenBao PKI per trust domain, and two locks keep each trust level apart | accepted | 2026-11-20 |
+| [0070](0070-mcp-over-http-serves-cli-bearer-tokens-first-and-cloud-ai-oauth-later-with-the-node-as-resource-server-only.md) | MCP over HTTP serves CLIs with bearer tokens first and cloud AIs with OAuth later, the node being a resource server only | accepted | 2026-11-20 |
+| [0071](0071-a-facilitator-node-opens-a-port-beyond-loopback-only-by-explicit-configuration-and-never-discovers-peers-on-the-lan.md) | A facilitator node opens a port beyond loopback only by explicit configuration, and never discovers peers on the LAN | accepted | 2026-11-20 |
+| [0072](0072-the-devhost-keeps-no-docker-cache-and-test-runs-clean-up-after-themselves-and-refuse-to-start-on-a-nearly-full-disk.md) | The devhost keeps no Docker cache, and test runs clean up after themselves and refuse to start on a nearly full disk | accepted | 2026-11-20 |
+| [0073](0073-the-registry-wins-over-the-agents-list-for-an-agents-model-and-skills-and-a-layer-can-be-forced-into-a-name-namespace.md) | The registry wins over the agents list for an agent's model and skills, and a layer can be forced into a name namespace | accepted | 2026-11-21 |
+| [0074](0074-each-agent-reads-the-skills-its-registry-path-resolves-through-an-added-directory-and-the-personal-folder-keeps-what-every-agent-shares.md) | Each agent reads the skills its registry path resolves through an added directory, and the personal folder keeps what every agent shares | accepted | 2026-11-20 |
+| [0075](0075-a-spoke-joins-through-a-join-endpoint-agents-are-bound-to-their-node-by-signed-cards-and-a-handle-can-be-qualified-by-its-node.md) | A spoke joins through a join endpoint, agents are bound to their node by signed cards, and a handle can be qualified by its node | accepted | 2026-11-23 |
+| [0076](0076-an-http-client-may-begin-a-conversation-under-a-persons-approval-and-public-under-team-reaches-only-a-nodes-own-http-clients.md) | An HTTP client may begin a conversation under a person's approval, and public under `team` reaches only a node's own HTTP clients | accepted | 2026-11-23 |
+| [0077](0077-each-vendors-files-are-rendered-from-templates-by-minijinja-cli-and-the-merge-is-unchanged.md) | Each vendor's files are rendered from templates by `minijinja-cli`, and the merge is unchanged | accepted | 2026-11-21 |
+| [0078](0078-a-node-issues-certificates-itself-by-default-with-the-ca-key-in-openbao-else-an-ssh-agent-else-a-file.md) | A node issues certificates itself by default, with the CA key in OpenBao, else an ssh-agent, else a file | accepted | 2026-11-23 |
+| [0079](0079-the-layer-file-extension-is-layer-and-the-registry-stops-writing-layers-both-changes-ending-in-2-0-0.md) | The layer file extension is `.layer`, and the registry stops writing layers, both changes ending in 2.0.0 | accepted (amends 0063) | 2026-11-23 |
+| [0080](0080-a-peer-keeps-its-own-ca-the-addressed-copy-is-a-conversation-level-rule-and-a-revoke-rotates-the-mesh-secret.md) | A peer keeps its own CA, the addressed copy is a conversation-level rule, and a revoke rotates the mesh secret | accepted (widens 0069) | 2026-11-24 |
+| [0081](0081-a-layer-source-may-be-a-folder-of-a-git-repo-or-a-release-archive-and-archive-size-is-capped-at-100-mib-with-an-override.md) | A layer source may be a folder of a git repo or a release archive, and archive size is capped at 100 MiB with an override (extends 0063) | accepted | 2026-11-24 |
+| [0082](0082-an-oauth-client-is-an-issuer-and-a-subject-and-an-unreadable-key-set-closes-the-gate-with-a-503.md) | An OAuth client is an issuer and a subject, and an unreadable key set closes the gate with a 503 | accepted | 2026-11-25 |
+| [0083](0083-the-devhost-reaches-the-workstations-docker-and-kubernetes-through-read-only-mounts-and-a-second-context.md) | The devhost reaches the workstation's Docker and Kubernetes through explicit mounts and a second context | accepted | 2026-11-25 |
+| [0084](0084-the-workstations-lasting-facilitator-hub-runs-on-rancher-desktop-from-a-git-ignored-overlay-with-the-built-in-issuer.md) | The workstation's lasting facilitator hub runs on Rancher Desktop from a git-ignored overlay, with the built-in issuer | accepted | 2026-11-25 |
+| [0085](0085-the-host-merges-its-own-green-pull-requests-except-governance-a-review-the-operator-asked-for-and-consumer-facing-bumps-releases-stay-the-operators.md) | The host merges its own green pull requests, except governance, a review the Operator asked for and consumer-facing bumps; releases stay the Operator's (supersedes the merging part of 0040) | accepted | 2026-11-25 |
+| [0086](0086-one-release-workflow-builds-pins-and-publishes-the-facilitator-and-waits-for-the-pin-pull-request-to-merge.md) | One release workflow builds, pins and publishes the facilitator, and waits for the pin pull request to merge | accepted | 2026-11-25 |
+| [0087](0087-a-person-gates-agent-to-agent-commands-twice-the-facilitator-holds-each-message-and-the-receiving-agent-asks-before-acting.md) | A person gates agent-to-agent commands twice: the facilitator holds each message, and the receiving agent asks before acting | accepted | 2026-11-25 |

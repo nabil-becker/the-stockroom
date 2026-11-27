@@ -1,0 +1,31 @@
+# Tasks contributed by the kustomize Feature (namespace: kustomize).
+version: '3'
+
+tasks:
+  version:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Show the installed kustomize version.'
+    cmds:
+      - kustomize version
+
+  build:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Render the kustomization in DIR (default: current directory) to stdout. Extra kustomize flags after --.'
+    vars:
+      DIR: '{{.DIR | default "."}}'
+    cmds:
+      - kustomize build '{{.DIR}}' {{.CLI_ARGS}}
+
+  build:all:
+    dir: '{{.USER_WORKING_DIR}}'
+    desc: 'Render every kustomization.yaml under ROOT (default: current directory) to /dev/null - a quick "does everything still build" check.'
+    vars:
+      ROOT: '{{.ROOT | default "."}}'
+    cmds:
+      - |
+        status=0
+        for k in $(find '{{.ROOT}}' -name kustomization.yaml -not -path '*/.git/*' | sort); do
+          d="$(dirname "$k")"
+          if kustomize build "$d" >/dev/null; then echo "ok    $d"; else echo "FAIL  $d"; status=1; fi
+        done
+        exit $status

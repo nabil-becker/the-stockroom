@@ -1,0 +1,51 @@
+{
+  "pinned_version": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "claude-code": {
+        "version": "2.1.286"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "augment_official": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "ghcr.io/devcontainers/features/node:1": {
+        "version": "24"
+      },
+      "ghcr.io/anthropics/devcontainer-features/claude-code:1": {},
+      "claude-code": {}
+    },
+    "remoteUser": "vscode"
+  },
+  "install_none": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "claude-code": {
+        "install": "none"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "additional_directories": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "claude-code": {
+        "additionalDirectories": "/workspaces/shared, ~/notes ,/mnt/One Drive"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "participants": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "go-task": {},
+      "claude-code": {
+        "install": "none",
+        "participants": true
+      }
+    },
+    "remoteUser": "vscode"
+  }
+}

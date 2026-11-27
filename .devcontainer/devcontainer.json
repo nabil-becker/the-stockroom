@@ -1,0 +1,126 @@
+{
+  // The stockroom workstation, the same on every machine: Dockerfile pins the base and tool
+  // images by digest, devcontainer-lock.json pins every Feature, each tool version below is
+  // explicit (never latest/stable), and post-create syncs .venv from uv.lock. `task env:check`
+  // enforces this and tells a container built from an older definition to rebuild. Bumps:
+  // Dependabot for images, Features and uv.lock; edit the version options here by hand.
+  // (Started from the bootstrap's starter; bootstrap never overwrites this file.)
+  "name": "${localWorkspaceFolderBasename}",
+  "build": { "dockerfile": "Dockerfile" },
+  "features": {
+    // upgradePackages: false keeps the base image's packages (a build-time upgrade would make the
+    // image depend on the day it was built); Dependabot's base-image bumps bring the updates.
+    "ghcr.io/devcontainers/features/common-utils:2": { "upgradePackages": false },
+    // Shares the host's Docker daemon (Docker Desktop / wslc). Swap for
+    // ghcr.io/devcontainers/features/docker-in-docker:2 (with "moby": false
+    // on Debian 13) if you need `devcontainer features test` or nested
+    // `devcontainer up` from inside on a Windows/macOS host.
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "version": "29.10.1",
+      "mobyBuildxVersion": "0.39.1",
+      "dockerDashComposeVersion": "5.8.0"
+    },
+    // Lint toolchain shared with the collection (devcontainer-features/.devcontainer): the same
+    // versions, so `task devcontainer-features:lint` runs here as in CI (task env:check compares).
+    "ghcr.io/nabil-becker/devcontainer-features/go-task:1": { "version": "3.54.0" },
+    "ghcr.io/devcontainers/features/powershell:1": {
+      "version": "7.6.7",
+      "modules": "Pester==6.2.0,PSScriptAnalyzer==1.25.0"
+    },
+    "ghcr.io/devcontainers-extra/features/yamllint:2": { "version": "1.38.0" },
+    // Helm for the stockroom's charts (lint, package, push to an OCI registry); no cluster tools.
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "version": "none",
+      "helm": "4.3.2",
+      "minikube": "none"
+    },
+    "ghcr.io/nabil-becker/devcontainer-features/devcontainer-cli:1": { "version": "0.91.0" },
+    // Every Feature of the collection owns its persistent state (logins,
+    // config, transcripts) in a named volume it mounts itself and makes
+    // usable at post-create; nothing to configure. git: worktree-aware
+    // wrapper, safe.directory and core.hooksPath; a checkout whose git dir
+    // lives in the host home's .git-dirs (OneDrive) needs no line here when
+    // you start through the tasks: the launcher adds that mount (git 1.4.0 or
+    // later; see "Host mounts" below).
+    "ghcr.io/nabil-becker/devcontainer-features/git:1": {},
+    // "ghcr.io/nabil-becker/devcontainer-features/gh:1": {},
+    "ghcr.io/nabil-becker/devcontainer-features/claude-code:1": { "participants": true, "version": "2.1.326" },
+    // The Feature pins the Copilot CLI itself (its dependsOn copilot-cli version).
+    "ghcr.io/nabil-becker/devcontainer-features/copilot:0": { "participants": true },
+    // The component registry (ADR-0063): resolves .devcontainer/registry.yml into skills/agents
+    // that claude-code and copilot (participants: true) hand to every agent at start.
+    "ghcr.io/nabil-becker/devcontainer-features/component-registry:2": {},
+    // An SSH agent at a fixed socket for signing commits; socket/key mode follows the host
+    // (DCF_HOST_SSH_AGENT) unless pinned here.
+    "ghcr.io/nabil-becker/devcontainer-features/ssh-agent:1": {},
+    // OpenBao CLI (bao) and dcf-secret, the one command the collection's Features use for secrets.
+    "ghcr.io/nabil-becker/devcontainer-features/openbao:1": { "version": "2.7.3" },
+    // sign-packet: canonical signed packets (the core register-engine/packet-relay/facilitator use).
+    "ghcr.io/nabil-becker/devcontainer-features/sign-packet:0": {},
+    // facilitator: MCP-based conversations between agents of any vendor in this devcontainer.
+    // Its bundleVersion default is a pinned release, fixed by the Feature's locked digest.
+    "ghcr.io/nabil-becker/devcontainer-features/facilitator:0": {}
+  },
+  // Syncs .venv (Python from .python-version, packages from uv.lock) and records the definition
+  // this container was created from, which `task env:check` compares after a pull.
+  "postCreateCommand": "task env:setup",
+  // The host, as the launcher (task devcontainer:up) found it: it sets these in its
+  // own environment before it runs the devcontainer CLI, and ${localEnv} passes them
+  // on. Features read them (unset = an unknown host, they use defaults); nothing in
+  // this file needs to know the host. Opening the folder straight in VS Code skips the
+  // launcher, so they expand to empty strings there: start through the tasks.
+  "containerEnv": {
+    // windows-docker, windows-wsl-docker, windows-wslc, linux or macos
+    "DCF_HOST_TYPE": "${localEnv:DCF_HOST_TYPE}",
+    // The host user's home: %USERPROFILE% on Windows, $HOME elsewhere
+    "DCF_HOST_HOME": "${localEnv:DCF_HOST_HOME}",
+    // socket, key or none (none for now)
+    "DCF_HOST_SSH_AGENT": "${localEnv:DCF_HOST_SSH_AGENT}",
+    // The host folder (DCF_HOST_CLOUD_FOLDER in .devcontainer/.env) the launcher mounts for the
+    // cloud-folder Feature; empty when none. The Feature's status names it.
+    "DCF_HOST_CLOUD_FOLDER": "${localEnv:DCF_HOST_CLOUD_FOLDER}",
+    // The workstation's machine name, set by the launcher: agents' session names use it for
+    // {machine}; "container" when empty.
+    "DCF_HOST_MACHINE": "${localEnv:DCF_HOST_MACHINE}",
+    // 1 when DCF_HOST_FUSE=1 in .devcontainer/.env asked the launcher for FUSE on this machine
+    // (the cloud-folder Feature's mount mode); empty otherwise.
+    "DCF_HOST_FUSE": "${localEnv:DCF_HOST_FUSE}",
+    // wslg when DCF_HOST_AUDIO=wslg in .devcontainer/.env gave the container WSLg's microphone
+    // (the audio Feature); none otherwise.
+    "DCF_HOST_AUDIO": "${localEnv:DCF_HOST_AUDIO}"
+  },
+  // FUSE on request, per machine (ADR 0031): with DCF_HOST_FUSE=1 in .devcontainer/.env the
+  // launcher fills these three with --device=/dev/fuse, --cap-add=SYS_ADMIN and
+  // --security-opt=apparmor=unconfined; otherwise each falls back to a harmless label, so no
+  // container gets the privilege unless asked. Keep the three lines even when unused; a change
+  // takes effect at the next task devcontainer:rebuild.
+  "runArgs": [
+    "${localEnv:DCF_HOST_FUSE_DEVICE:--label=dcf.fuse.device=off}",
+    "${localEnv:DCF_HOST_FUSE_CAP:--label=dcf.fuse.cap=off}",
+    "${localEnv:DCF_HOST_FUSE_SECURITY:--label=dcf.fuse.security=off}"
+  ],
+  // Host mounts: the launcher (task devcontainer:up / rebuild) adds the mounts the host type
+  // needs with `devcontainer up --mount`, today the host home's .git-dirs at /git-dirs (the git
+  // Feature's one mount), so nothing here declares it; also, when DCF_HOST_CLOUD_FOLDER is set,
+  // that host folder at /mnt/cloud-folder-host, where the cloud-folder Feature's mountPoint
+  // option links. HOST_MOUNTS=false turns that off. If you
+  // keep or add the line below, the launcher sees the target and skips its own, so it is harmless.
+  // Only when you also open the folder straight in VS Code (Reopen in Container), which skips the
+  // launcher and leaves DCF_HOST_HOME empty, add the line yourself, with the home variable VS Code
+  // itself sees: ${localEnv:USERPROFILE} on a Windows host, ${localEnv:HOME} on Linux, macOS and WSL
+  // (not DCF_HOST_HOME). Create the folder first with the initializeCommand of the next block:
+  //   "mounts": [ "source=${localEnv:USERPROFILE}/.git-dirs,target=/git-dirs,type=bind" ],
+  //
+  // To keep a Feature's state on the host disk instead of its volume
+  // (survives container-engine resets, stays outside a synced checkout),
+  // bind-mount the same target; the repo's mount wins over the Feature's.
+  // The folder must exist before the start, hence the initializeCommand
+  // (array form: a string goes through cmd /c on Windows, which mangles
+  // quotes and %VARS%):
+  //   "initializeCommand": ["task", "devcontainer:homes", "NAME=myrepo", "--", "claude-code", "gh"],
+  //   "mounts": [
+  //     "source=${localEnv:USERPROFILE}/.devcontainer-homes/myrepo/claude-code,target=/var/lib/devcontainer-features/claude-code,type=bind",
+  //     "source=${localEnv:USERPROFILE}/.devcontainer-homes/myrepo/gh,target=/var/lib/devcontainer-features/gh,type=bind"
+  //   ],
+  "remoteUser": "vscode"
+}

@@ -1,0 +1,52 @@
+{
+  "no_wrapper": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "git": {
+        "worktreeAware": false
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "hooks_and_safe_all": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "git": {
+        "hooksPath": ".githooks",
+        "safeDirectory": "*"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "commit_identity": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "git": {
+        "commitName": "devhost agent",
+        "commitEmail": "devhost-agent@noreply.invalid"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "commit_identity_agents_only": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "git": {
+        "commitName": "devhost agent",
+        "commitEmail": "devhost-agent@noreply.invalid",
+        "commitWhenEnv": "CLAUDECODE"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "git_dirs_mapping": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "git": {}
+    },
+    "containerEnv": {
+      "GIT_DIRS_ROOT": "/tmp/git-dirs-test"
+    },
+    "remoteUser": "vscode"
+  }
+}

@@ -1,0 +1,17 @@
+version: '3'
+
+# Stdlib only, so the host's python runs it before .venv exists. Var names are unique: go-task merges included vars.
+vars:
+  SYSTEM_PYTHON: '{{if eq OS "windows"}}python{{else}}python3{{end}}'
+
+tasks:
+  setup:
+    desc: 'Sync .venv with uv.lock (Python from .python-version) and, in a new workstation container, record the definition it was created from. Post-create runs it; run it again after pulling a uv.lock change.'
+    cmds:
+      - '{{.SYSTEM_PYTHON}} tools/environment/check.py record'
+      - uv sync --locked
+
+  check:
+    desc: 'Check that the environment definition pins every version and matches the collection''s lint toolchain; in the workstation also that this container matches the definition (else task devcontainer:rebuild on the host) and .venv matches uv.lock (else task env:setup).'
+    cmds:
+      - '{{.SYSTEM_PYTHON}} tools/environment/check.py check'

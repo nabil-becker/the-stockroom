@@ -1,0 +1,12 @@
+# Repo-local git settings, kept as documentation: git never reads a tracked
+# config file on its own, and `task repo:setup` sets these two values directly
+# in the clone's git config (it does not include this file). Do not add
+# `include.path ../.gitconfig`: with the git dir outside the worktree it points
+# next to the git dir, a place other processes can write.
+[core]
+	# Repo-provided hooks (.githooks/): prepare-commit-msg adds the DCO
+	# Signed-off-by trailer, so you can forget about `-s`.
+	hooksPath = .githooks
+[alias]
+	# Explicit sign-off commit, for clones where the hook is not active.
+	cs = commit -s

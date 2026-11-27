@@ -1,0 +1,20 @@
+{
+  "pinned_version": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "go-task": {
+        "version": "v3.54.0"
+      }
+    },
+    "remoteUser": "vscode"
+  },
+  "aliases": {
+    "image": "mcr.microsoft.com/devcontainers/base:debian",
+    "features": {
+      "go-task": {
+        "taskAliases": true
+      }
+    },
+    "remoteUser": "vscode"
+  }
+}
