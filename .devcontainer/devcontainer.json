@@ -23,7 +23,7 @@
     // Lint toolchain shared with the collection (devcontainer-features/.devcontainer): the same
     // versions, so `task devcontainer-features:lint` runs here as in CI (task env:check compares).
     "ghcr.io/nabil-becker/devcontainer-features/go-task:1": { "version": "3.54.0" },
-    "ghcr.io/devcontainers/features/powershell:1": {
+    "ghcr.io/devcontainers/features/powershell:2": {
       "version": "7.6.7",
       "modules": "Pester==6.2.0,PSScriptAnalyzer==1.25.0"
     },
